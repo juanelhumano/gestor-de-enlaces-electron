@@ -40,10 +40,7 @@
       "output": "dist"
     },
     "win": {
-      "target": [
-        "nsis",
-        "portable"
-      ],
+      "target": ["nsis", "portable"],
       "icon": "libro.png"
     },
     "nsis": {
@@ -59,8 +56,7 @@
       "provider": "github",
       "owner": "juanelhumano",
       "repo": "gestor-de-enlaces-electron",
-      "releaseType": "release",
-      "draft": false
+      "releaseType": "release"
     }
   }
 }
