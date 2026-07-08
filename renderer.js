@@ -39,6 +39,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const globalCategoryFilterContainer = document.getElementById('globalCategoryFilterContainer');
     const settingsBtn = document.getElementById('settingsBtn'), settingsModal = document.getElementById('settingsModal'), closeSettingsModalBtn = document.getElementById('closeSettingsModalBtn'), saveSettingsBtn = document.getElementById('saveSettingsBtn');
     const settingDefaultSection = document.getElementById('settingDefaultSection'), settingSearchMode = document.getElementById('settingSearchMode'), settingDarkMode = document.getElementById('settingDarkMode'), settingOpenAtLogin = document.getElementById('settingOpenAtLogin');
+    const appVersionLabel = document.getElementById('appVersionLabel');
     
     // Chat UI Elements
     const chatToggleButton = document.getElementById('chatToggleButton'), chatNotification = document.getElementById('chatNotification'), chatWindow = document.getElementById('chatWindow'), closeChatBtn = document.getElementById('closeChatBtn'), chatMessages = document.getElementById('chatMessages'), chatInput = document.getElementById('chatInput'), sendChatBtn = document.getElementById('sendChatBtn'), emojiBtn = document.getElementById('emojiBtn'), mentionSuggestions = document.getElementById('mentionSuggestions'), muteChatBtn = document.getElementById('muteChatBtn');
@@ -149,6 +150,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             console.error('No se pudieron cargar las preferencias, se usan los valores por defecto.', e);
         }
         applyDarkMode(appSettings.darkMode);
+        try {
+            const version = await electronAPI.getAppVersion();
+            appVersionLabel.textContent = `v${version}`;
+        } catch (e) { /* no-op */ }
     }
 
     function openSettingsModal() {
@@ -702,6 +707,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         await electronAPI.manualSync();
     }
     syncBtn.addEventListener('click', handleManualSync);
+
+    // Muestra en pantalla los mensajes de sincronización y de actualización (antes se enviaban
+    // desde main.js pero nada los escuchaba en la interfaz).
+    electronAPI.onSyncStatus((status) => {
+        syncStatusContainer.innerHTML = `<div class="p-2 rounded-lg text-center text-xs ${status.success ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}">${status.message}</div>`;
+        clearTimeout(syncStatusContainer._clearTimer);
+        syncStatusContainer._clearTimer = setTimeout(() => { syncStatusContainer.innerHTML = ''; }, 6000);
+    });
 
     // Bind section buttons
     linksBtn.addEventListener('click', () => showSection('linksSection'));

@@ -57,22 +57,31 @@ function setupAutoUpdater() {
 
   autoUpdater.autoDownload = true;
 
-  autoUpdater.on('update-available', (info) => {
-    console.log('Actualización disponible:', info.version);
+  function sendStatus(success, message) {
+    console.log(`[autoUpdater] ${message}`);
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('sync-status', { success: true, message: `Descargando actualización ${info.version}...` });
+      mainWindow.webContents.send('sync-status', { success, message });
     }
+  }
+
+  autoUpdater.on('checking-for-update', () => {
+    sendStatus(true, 'Buscando actualizaciones...');
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    sendStatus(true, `Descargando actualización ${info.version}...`);
   });
 
   autoUpdater.on('update-not-available', () => {
-    console.log('La aplicación está actualizada.');
+    sendStatus(true, `Ya tienes la última versión (${app.getVersion()}).`);
   });
 
   autoUpdater.on('error', (err) => {
-    console.error('Error en autoUpdater:', err.message);
+    sendStatus(false, `Error al buscar actualizaciones: ${err.message}`);
   });
 
   autoUpdater.on('update-downloaded', (info) => {
+    sendStatus(true, `Actualización ${info.version} descargada. Reinicia para instalarla.`);
     dialog.showMessageBox(mainWindow, {
       type: 'info',
       title: 'Actualización lista',
@@ -264,6 +273,32 @@ async function uploadLocalChanges() {
     }
 }
 
+// En una instalación nueva, intenta primero descargar los usuarios reales desde Firebase.
+// Solo si después de eso sigue sin haber NINGÚN usuario (ni local ni remoto) se crea un admin
+// de emergencia, con un ID único por instalación (nunca un ID fijo, para no chocar con el
+// admin real de otras instalaciones al sincronizar).
+async function ensureAdminAccountExists() {
+  try {
+    await downloadAndConcileData();
+  } catch (e) {
+    console.error('No se pudo sincronizar antes de verificar el usuario admin:', e.message);
+  }
+
+  const userCount = db.prepare('SELECT COUNT(*) as c FROM users WHERE isDeleted = 0').get().c;
+  if (userCount > 0) return; // Ya hay usuarios (locales o recién descargados de Firebase). No crear nada.
+
+  const ADMIN_USERNAME = process.env.DEFAULT_ADMIN_USERNAME || 'admin';
+  const ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || crypto.randomBytes(9).toString('base64url');
+  const hashedPassword = bcrypt.hashSync(ADMIN_PASSWORD, SALT_ROUNDS);
+  const now = Date.now();
+  db.prepare('INSERT INTO users (id, username, password, role, status, lastModified) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(uuidv4(), ADMIN_USERNAME, hashedPassword, 'admin', 'approved', now);
+  console.log(`No se encontró ningún usuario (ni local ni en Firebase). Se creó un admin de emergencia: "${ADMIN_USERNAME}".`);
+  if (!process.env.DEFAULT_ADMIN_PASSWORD) {
+    console.log(`Contraseña generada automáticamente (guárdala, no se mostrará de nuevo): ${ADMIN_PASSWORD}`);
+  }
+}
+
 async function syncDataWithFirebase() {
     console.log('Iniciando sincronización bidireccional...');
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -352,22 +387,6 @@ function initializeDatabase() {
     db.exec(`CREATE TABLE IF NOT EXISTS sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, role TEXT NOT NULL
     )`);
-
-    const ADMIN_USERNAME = process.env.DEFAULT_ADMIN_USERNAME || 'admin';
-    const existingAdmin = db.prepare('SELECT * FROM users WHERE username = ?').get(ADMIN_USERNAME);
-    if (!existingAdmin) {
-      // Si no defines DEFAULT_ADMIN_PASSWORD en tu .env, se genera una contraseña aleatoria
-      // y se imprime UNA sola vez en consola. Cámbiala desde la app en tu primer inicio de sesión.
-      const ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || crypto.randomBytes(9).toString('base64url');
-      const hashedPassword = bcrypt.hashSync(ADMIN_PASSWORD, SALT_ROUNDS);
-      const now = Date.now();
-      const ADMIN_USER_ID = '00000000-admin-0000-0000-000000000001';
-      db.prepare('INSERT INTO users (id, username, password, role, status, lastModified) VALUES (?, ?, ?, ?, ?, ?)').run(ADMIN_USER_ID, ADMIN_USERNAME, hashedPassword, 'admin', 'approved', now);
-      console.log(`Usuario admin por defecto "${ADMIN_USERNAME}" creado.`);
-      if (!process.env.DEFAULT_ADMIN_PASSWORD) {
-        console.log(`Contraseña generada automáticamente (guárdala, no se mostrará de nuevo): ${ADMIN_PASSWORD}`);
-      }
-    }
 
   } catch (err) {
     console.error('Error al inicializar la base de datos:', err.message);
@@ -617,6 +636,7 @@ function writeSettings(settings) {
 }
 
 ipcMain.handle('get-settings', () => readSettings());
+ipcMain.handle('get-app-version', () => app.getVersion());
 
 ipcMain.handle('save-settings', (event, newSettings) => {
   const merged = { ...readSettings(), ...newSettings };
@@ -652,6 +672,7 @@ ipcMain.handle('send-chat-message-to-firebase', async (event, { userId, username
 
 app.whenReady().then(async () => {
   initializeDatabase();
+  await ensureAdminAccountExists();
   await deleteOldFirestoreChatMessages(); // Clean up old messages on startup
   createWindow();
   setupAutoUpdater();
