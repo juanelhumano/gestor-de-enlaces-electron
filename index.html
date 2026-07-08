@@ -161,6 +161,86 @@
         .chat-mention:hover {
             background-color: #bae6fd; /* blue-200 */
         }
+
+        /* Insignia explícita de "Personal" (antes solo había un candado difícil de notar) */
+        .visibility-badge-personal {
+            display: inline-flex; align-items: center; gap: 4px;
+            font-size: 0.65rem; font-weight: 700; text-transform: uppercase;
+            padding: 1px 8px; border-radius: 9999px; margin-right: 6px;
+            background-color: #fef3c7; color: #92400e; /* amber-100 / amber-800 */
+            white-space: nowrap;
+        }
+
+        /* ===================== Modo Oscuro ===================== */
+        /* No usamos las variantes dark: de Tailwind porque gran parte del HTML se genera
+           dinámicamente en renderer.js; en su lugar sobreescribimos las clases de utilidad
+           más usadas cuando el body tiene la clase .dark-mode. */
+        body.dark-mode {
+            background-color: #0f172a; /* slate-900 */
+            color: #e2e8f0;
+        }
+        body.dark-mode .bg-white,
+        body.dark-mode .bg-gray-50,
+        body.dark-mode .bg-gray-100 {
+            background-color: #1e293b !important; /* slate-800 */
+        }
+        body.dark-mode #sidebar { background-color: #0b1220 !important; }
+        body.dark-mode .modal-content { background-color: #1e293b !important; color: #e2e8f0; }
+        body.dark-mode .text-gray-900,
+        body.dark-mode .text-gray-800,
+        body.dark-mode .text-gray-700 {
+            color: #e2e8f0 !important;
+        }
+        body.dark-mode .text-gray-600,
+        body.dark-mode .text-gray-500 {
+            color: #94a3b8 !important; /* slate-400 */
+        }
+        body.dark-mode input,
+        body.dark-mode select,
+        body.dark-mode textarea {
+            background-color: #334155 !important; /* slate-700 */
+            color: #e2e8f0 !important;
+            border-color: #475569 !important;
+        }
+        body.dark-mode input::placeholder,
+        body.dark-mode textarea::placeholder {
+            color: #94a3b8 !important;
+        }
+        body.dark-mode .border,
+        body.dark-mode [class*="border-gray"] {
+            border-color: #334155 !important;
+        }
+        body.dark-mode pre,
+        body.dark-mode .bg-gray-100.p-1 {
+            background-color: #0f172a !important;
+            color: #cbd5e1 !important;
+        }
+        body.dark-mode #chatWindow,
+        body.dark-mode #mentionSuggestions {
+            background-color: #1e293b !important;
+            color: #e2e8f0;
+        }
+        body.dark-mode .mention-item {
+            border-bottom-color: #334155;
+        }
+        body.dark-mode .mention-item:hover {
+            background-color: #334155;
+        }
+        body.dark-mode .visibility-badge-personal {
+            background-color: #78350f; color: #fde68a;
+        }
+        body.dark-mode #viewNoteContentContainer {
+            background-color: #0f172a !important;
+            border-color: #334155 !important;
+        }
+        body.dark-mode .ql-toolbar.ql-snow,
+        body.dark-mode .ql-container.ql-snow {
+            background-color: #334155 !important;
+            color: #e2e8f0 !important;
+            border-color: #475569 !important;
+        }
+        body.dark-mode .ql-snow .ql-stroke { stroke: #e2e8f0 !important; }
+        body.dark-mode .ql-snow .ql-picker { color: #e2e8f0 !important; }
     </style>
 </head>
 <body class="flex min-h-screen p-4 bg-gray-100">
@@ -212,6 +292,44 @@
         </div>
     </div>
 
+    <!-- Settings Modal -->
+    <div id="settingsModal" class="modal-overlay hidden">
+        <div class="modal-content p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-xl font-bold text-gray-800">Configuración</h2>
+                <button id="closeSettingsModalBtn" class="modal-close-btn">&times;</button>
+            </div>
+
+            <label class="block text-sm font-semibold text-gray-700 mb-1">Sección inicial al abrir la app</label>
+            <select id="settingDefaultSection" class="w-full p-2 border rounded-lg mb-4 text-sm">
+                <option value="linksSection">Enlaces</option>
+                <option value="notesSection">Notas</option>
+                <option value="queriesSection">Queries</option>
+                <option value="globalSection">Global</option>
+            </select>
+
+            <label class="block text-sm font-semibold text-gray-700 mb-1">Tipo de búsqueda</label>
+            <select id="settingSearchMode" class="w-full p-2 border rounded-lg mb-1 text-sm">
+                <option value="incremental">Incremental (por relevancia)</option>
+                <option value="exact">Exacta (frase literal)</option>
+            </select>
+            <p class="text-xs text-gray-500 mb-4">Incremental: encuentra resultados aunque las palabras estén en otro orden y los ordena por relevancia. Exacta: solo muestra resultados que contengan la frase escrita tal cual.</p>
+
+            <div class="flex items-center justify-between mb-3">
+                <label for="settingDarkMode" class="text-sm font-semibold text-gray-700">Modo oscuro</label>
+                <input type="checkbox" id="settingDarkMode" class="h-5 w-5">
+            </div>
+
+            <div class="flex items-center justify-between mb-4">
+                <label for="settingOpenAtLogin" class="text-sm font-semibold text-gray-700">Iniciar con Windows</label>
+                <input type="checkbox" id="settingOpenAtLogin" class="h-5 w-5">
+            </div>
+
+            <button id="saveSettingsBtn" class="w-full bg-blue-600 text-white p-2 rounded-lg hover:bg-blue-700">Guardar</button>
+        </div>
+    </div>
+
+
     <!-- Sidebar -->
     <div id="sidebar" class="sidebar bg-gray-800 text-white rounded-xl shadow-lg p-4 flex flex-col items-center mr-4 hidden">
         <h2 class="text-xl font-bold mb-6 text-center">Menú</h2>
@@ -226,6 +344,7 @@
         <button id="exportBtn" class="w-full text-left p-3 rounded-lg bg-gray-700 hover:bg-gray-600 mb-2 text-sm"><i class="fas fa-file-export mr-2"></i> Exportar</button>
         <button id="importBtn" class="w-full text-left p-3 rounded-lg bg-gray-700 hover:bg-gray-600 mb-2 text-sm"><i class="fas fa-file-import mr-2"></i> Importar</button>
         <button id="syncBtn" class="w-full text-left p-3 rounded-lg bg-gray-700 hover:bg-gray-600 mb-2 text-sm"><i class="fas fa-sync-alt mr-2"></i> Sincronizar</button>
+        <button id="settingsBtn" class="w-full text-left p-3 rounded-lg bg-gray-700 hover:bg-gray-600 mb-2 text-sm"><i class="fas fa-cog mr-2"></i> Configuración</button>
         <button id="logoutBtn" class="w-full text-left p-3 rounded-lg bg-red-600 text-white hover:bg-red-700 text-sm mt-auto"><i class="fas fa-sign-out-alt mr-2"></i> Cerrar Sesión</button>
     </div>
 

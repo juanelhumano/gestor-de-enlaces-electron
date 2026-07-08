@@ -49,5 +49,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Utilidades
   onSyncStatus: (callback) => ipcRenderer.on('sync-status', (event, status) => callback(status)),
-  manualSync: () => ipcRenderer.invoke('manual-sync')
+  manualSync: () => ipcRenderer.invoke('manual-sync'),
+
+  // Configuración
+  getSettings: () => ipcRenderer.invoke('get-settings'),
+  saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings)
 });

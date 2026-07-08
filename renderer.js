@@ -16,6 +16,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     let geminiChatHistory = []; // To store the conversation with Gemini
     let generalChatHistory = []; // To store general chat messages
     let currentQuillInstance = null; // To hold the active Quill editor instance
+    let appSettings = { defaultSection: 'linksSection', searchMode: 'incremental', darkMode: false, openAtLogin: false };
 
     // --- UI Elements ---
     const loginModal = document.getElementById('loginModal'), loginUsername = document.getElementById('loginUsername'), loginPassword = document.getElementById('loginPassword'), loginBtn = document.getElementById('loginBtn'), loginMessage = document.getElementById('loginMessage'), rememberMeCheckbox = document.getElementById('rememberMe'), showRequestAccessBtn = document.getElementById('showRequestAccessBtn'), showForgotPasswordBtn = document.getElementById('showForgotPasswordBtn'), loginRefreshBtn = document.getElementById('loginRefreshBtn');
@@ -36,6 +37,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const confirmModal = document.getElementById('confirmModal'), confirmYesBtn = document.getElementById('confirmYesBtn'), confirmNoBtn = document.getElementById('confirmNoBtn'), confirmModalMessage = document.getElementById('confirmModalMessage');
     const globalTypeFilterContainer = document.getElementById('globalTypeFilterContainer');
     const globalCategoryFilterContainer = document.getElementById('globalCategoryFilterContainer');
+    const settingsBtn = document.getElementById('settingsBtn'), settingsModal = document.getElementById('settingsModal'), closeSettingsModalBtn = document.getElementById('closeSettingsModalBtn'), saveSettingsBtn = document.getElementById('saveSettingsBtn');
+    const settingDefaultSection = document.getElementById('settingDefaultSection'), settingSearchMode = document.getElementById('settingSearchMode'), settingDarkMode = document.getElementById('settingDarkMode'), settingOpenAtLogin = document.getElementById('settingOpenAtLogin');
     
     // Chat UI Elements
     const chatToggleButton = document.getElementById('chatToggleButton'), chatNotification = document.getElementById('chatNotification'), chatWindow = document.getElementById('chatWindow'), closeChatBtn = document.getElementById('closeChatBtn'), chatMessages = document.getElementById('chatMessages'), chatInput = document.getElementById('chatInput'), sendChatBtn = document.getElementById('sendChatBtn'), emojiBtn = document.getElementById('emojiBtn'), mentionSuggestions = document.getElementById('mentionSuggestions'), muteChatBtn = document.getElementById('muteChatBtn');
@@ -68,8 +71,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (sectionId === 'linksSection') linksBtn.classList.add('bg-blue-600');
         else if (sectionId === 'notesSection') notesBtn.classList.add('bg-blue-600');
         else if (sectionId === 'queriesSection') queriesBtn.classList.add('bg-blue-600');
-        else if (sectionId === 'globalSection') globalBtn.classList.add('bg-blue-600');
-        else if (sectionId === 'favoritesSection') {
+        else if (sectionId === 'globalSection') {
+            globalBtn.classList.add('bg-blue-600');
+            filterGlobal();
+        } else if (sectionId === 'favoritesSection') {
             favoritesBtn.classList.add('bg-blue-600');
             displayFavorites();
         } else if (sectionId === 'usersSection') {
@@ -132,6 +137,50 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     confirmNoBtn.addEventListener('click', () => closeModal(confirmModal));
 
+    // --- Configuración de la app ---
+    function applyDarkMode(enabled) {
+        document.body.classList.toggle('dark-mode', !!enabled);
+    }
+
+    async function loadSettings() {
+        try {
+            appSettings = await electronAPI.getSettings();
+        } catch (e) {
+            console.error('No se pudieron cargar las preferencias, se usan los valores por defecto.', e);
+        }
+        applyDarkMode(appSettings.darkMode);
+    }
+
+    function openSettingsModal() {
+        settingDefaultSection.value = appSettings.defaultSection;
+        settingSearchMode.value = appSettings.searchMode;
+        settingDarkMode.checked = !!appSettings.darkMode;
+        settingOpenAtLogin.checked = !!appSettings.openAtLogin;
+        openModal(settingsModal);
+    }
+    settingsBtn.addEventListener('click', openSettingsModal);
+    closeSettingsModalBtn.addEventListener('click', () => closeModal(settingsModal));
+
+    saveSettingsBtn.addEventListener('click', async () => {
+        const newSettings = {
+            defaultSection: settingDefaultSection.value,
+            searchMode: settingSearchMode.value,
+            darkMode: settingDarkMode.checked,
+            openAtLogin: settingOpenAtLogin.checked
+        };
+        try {
+            const result = await electronAPI.saveSettings(newSettings);
+            appSettings = result.settings;
+            applyDarkMode(appSettings.darkMode);
+            // Re-aplica la búsqueda actual con el nuevo modo, y re-renderiza listas
+            filterLinks(); filterNotes(); filterQueries(); filterGlobal();
+            showMessage('Configuración guardada.');
+            closeModal(settingsModal);
+        } catch (e) {
+            showMessage(`Error al guardar la configuración: ${e.message}`, true);
+        }
+    });
+
     // --- Authentication & Session ---
     async function handleLogin() {
         const result = await electronAPI.login({ 
@@ -150,6 +199,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             checkPermissions();
             await loadInitialData();
             electronAPI.manualSync();
+            showSection(appSettings.defaultSection || 'linksSection');
         } else {
             loginMessage.textContent = result.message;
             loginMessage.classList.remove('hidden');
@@ -204,6 +254,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             checkPermissions();
             await loadInitialData();
             electronAPI.manualSync();
+            showSection(appSettings.defaultSection || 'linksSection');
         } else {
             openModal(loginModal);
         }
@@ -217,7 +268,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     
     function renderUsers() {
-        const filteredUsers = allUsers.filter(u => matchesSearch(searchUsersBar.value, u.username));
+        const term = normalizeText(searchUsersBar.value);
+        const filteredUsers = allUsers.filter(u => !term || normalizeText(u.username).includes(term));
 
         usersList.innerHTML = filteredUsers.map(user => {
             const isPending = user.status === 'pending';
@@ -311,9 +363,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         await electronAPI.getInitialData({ userId: currentUserId, userRole: currentUserRole });
     }
 
-    electronAPI.onUpdateLinks((links) => { allLinks = links; filterLinks(); updateFavoritesList(); });
-    electronAPI.onUpdateNotes((notes) => { allNotes = notes; filterNotes(); updateFavoritesList(); });
-    electronAPI.onUpdateQueries((queries) => { allQueries = queries; filterQueries(); updateFavoritesList(); });
+    electronAPI.onUpdateLinks((links) => { allLinks = links; filterLinks(); filterGlobal(); updateFavoritesList(); });
+    electronAPI.onUpdateNotes((notes) => { allNotes = notes; filterNotes(); filterGlobal(); updateFavoritesList(); });
+    electronAPI.onUpdateQueries((queries) => { allQueries = queries; filterQueries(); filterGlobal(); updateFavoritesList(); });
     electronAPI.onUpdateUsers((users) => { allUsers = users; if(currentUserRole === 'admin' && !usersSection.classList.contains('hidden')) { renderUsers(); } });
 
 
@@ -334,7 +386,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (item.category === 'SICAR 4') categoryColor = 'blue';
             else if (item.category === 'SICAR X') categoryColor = 'green';
             const categoryBadge = `<span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-${categoryColor}-100 text-${categoryColor}-800 mr-2">${item.category}</span>`;
-            const privateIcon = item.visibility === 'private' ? `<i class="fas fa-lock text-gray-500 mr-2" title="Personal"></i>` : '';
+            const privateIcon = item.visibility === 'private' ? `<span class="visibility-badge-personal" title="Solo tú puedes ver este elemento"><i class="fas fa-lock"></i> Personal</span>` : '';
 
             let iconHtml, contentHtml, copyButtonHtml, editButtonHtml, deleteButtonHtml;
             const isFav = item.isFavorite ? 'text-yellow-400' : 'text-gray-400';
@@ -365,7 +417,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }).join('');
     }
 
-    // --- Búsqueda mejorada ---
+    // --- Búsqueda mejorada (configurable: exacta o incremental por relevancia) ---
     // Quita acentos/diacríticos, pasa a minúsculas, quita etiquetas HTML y normaliza espacios.
     function normalizeText(str) {
         if (!str) return '';
@@ -377,21 +429,52 @@ document.addEventListener('DOMContentLoaded', async () => {
             .trim();
     }
 
-    // Coincide si TODAS las palabras del término de búsqueda aparecen en el texto combinado,
-    // sin importar el orden ni los acentos. Esto arregla búsquedas que antes fallaban por
-    // mayúsculas/acentos, HTML de notas, o por escribir las palabras en otro orden.
-    function matchesSearch(searchTerm, ...fields) {
-        const term = normalizeText(searchTerm);
-        if (!term) return true;
-        const haystack = normalizeText(fields.join(' '));
-        const words = term.split(' ').filter(Boolean);
-        return words.every(word => haystack.includes(word));
+    // Calcula si un elemento coincide con el término de búsqueda y con qué puntaje de relevancia.
+    // Devuelve -1 si no coincide. En modo "exact" solo hay coincidencia/no coincidencia (score 0).
+    // En modo "incremental" todas las palabras deben aparecer (en cualquier orden) y se puntúa
+    // más alto si coinciden en el campo principal (nombre/título) que en el secundario.
+    function searchScore(term, primaryText, secondaryText) {
+        const t = normalizeText(term);
+        if (!t) return 0;
+        const primary = normalizeText(primaryText);
+        const secondary = normalizeText(secondaryText);
+
+        if (appSettings.searchMode === 'exact') {
+            return `${primary} ${secondary}`.includes(t) ? 0 : -1;
+        }
+
+        // Modo incremental / por relevancia
+        const words = t.split(' ').filter(Boolean);
+        const combined = `${primary} ${secondary}`;
+        if (!words.every(word => combined.includes(word))) return -1;
+
+        let score = 0;
+        words.forEach(word => {
+            if (primary.includes(word)) score += 3;
+            if (secondary.includes(word)) score += 1;
+        });
+        if (primary.startsWith(t)) score += 5;
+        else if (primary.includes(t)) score += 2;
+        return score;
+    }
+
+    // Filtra y, en modo incremental, ordena por relevancia. Si no hay término de búsqueda,
+    // regresa los elementos tal cual (sin reordenar).
+    function searchFilterSort(items, term, primaryFn, secondaryFn) {
+        if (!normalizeText(term)) return items;
+        const scored = items
+            .map(item => ({ item, score: searchScore(term, primaryFn(item), secondaryFn(item)) }))
+            .filter(x => x.score >= 0);
+        if (appSettings.searchMode !== 'exact') {
+            scored.sort((a, b) => b.score - a.score);
+        }
+        return scored.map(x => x.item);
     }
 
     // Filter functions
-    function filterLinks() { renderItems(allLinks.filter(link => matchesSearch(searchLinksBar.value, link.name, link.url)), linksList, 'visibilityFilterLinks'); }
-    function filterNotes() { renderItems(allNotes.filter(note => matchesSearch(searchNotesBar.value, note.title, note.content)), notesList, 'visibilityFilterNotes'); }
-    function filterQueries() { renderItems(allQueries.filter(q => matchesSearch(searchQueriesBar.value, q.title, q.queryContent)), queriesList, 'visibilityFilterQueries'); }
+    function filterLinks() { renderItems(searchFilterSort(allLinks, searchLinksBar.value, l => l.name, l => l.url), linksList, 'visibilityFilterLinks'); }
+    function filterNotes() { renderItems(searchFilterSort(allNotes, searchNotesBar.value, n => n.title, n => n.content), notesList, 'visibilityFilterNotes'); }
+    function filterQueries() { renderItems(searchFilterSort(allQueries, searchQueriesBar.value, q => q.title, q => q.queryContent), queriesList, 'visibilityFilterQueries'); }
     
     function filterGlobal() {
         const term = searchGlobalBar.value.trim();
@@ -408,7 +491,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             globalList.innerHTML = '';
             return;
         }
-        const results = sourceData.filter(i => matchesSearch(term, i.name || i.title, i.url || i.content || i.queryContent)).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        const results = searchFilterSort(
+            sourceData, term,
+            i => i.name || i.title,
+            i => i.url || i.content || i.queryContent
+        );
+        if (appSettings.searchMode === 'exact') {
+            results.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        }
         renderItems(results, globalList);
     }
 
@@ -894,5 +984,5 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     // --- Initial Load ---
-    checkSavedSession();
+    loadSettings().then(checkSavedSession);
 });

@@ -594,6 +594,45 @@ ipcMain.handle('clear-session', () => {
 ipcMain.handle('manual-sync', async () => syncDataWithFirebase());
 ipcMain.handle('print-note', () => mainWindow.webContents.print({}));
 
+// --- Configuración local de la app (no se sincroniza con Firebase, es por instalación) ---
+const settingsFilePath = path.join(app.getPath('userData'), 'app-settings.json');
+const DEFAULT_SETTINGS = {
+  defaultSection: 'linksSection', // linksSection | notesSection | queriesSection | globalSection
+  searchMode: 'incremental',      // 'exact' | 'incremental'
+  darkMode: false,
+  openAtLogin: false
+};
+
+function readSettings() {
+  try {
+    const raw = fs.readFileSync(settingsFilePath, 'utf-8');
+    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+  } catch (e) {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+function writeSettings(settings) {
+  fs.writeFileSync(settingsFilePath, JSON.stringify(settings, null, 2), 'utf-8');
+}
+
+ipcMain.handle('get-settings', () => readSettings());
+
+ipcMain.handle('save-settings', (event, newSettings) => {
+  const merged = { ...readSettings(), ...newSettings };
+  writeSettings(merged);
+
+  // "Iniciar con Windows" solo tiene soporte nativo en Windows y macOS.
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    try {
+      app.setLoginItemSettings({ openAtLogin: !!merged.openAtLogin });
+    } catch (e) {
+      console.error('No se pudo configurar el inicio automático:', e.message);
+    }
+  }
+  return { success: true, settings: merged };
+});
+
 // Chat IPC Handlers
 ipcMain.handle('send-chat-message-to-firebase', async (event, { userId, username, message }) => {
     try {
@@ -616,6 +655,9 @@ app.whenReady().then(async () => {
   await deleteOldFirestoreChatMessages(); // Clean up old messages on startup
   createWindow();
   setupAutoUpdater();
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    try { app.setLoginItemSettings({ openAtLogin: !!readSettings().openAtLogin }); } catch (e) { /* no-op */ }
+  }
   mainWindow.webContents.on('did-finish-load', () => {
     // Initial data load is now triggered by login or session check
   });
