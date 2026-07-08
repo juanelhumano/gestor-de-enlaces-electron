@@ -1,0 +1,27 @@
+# Dependencias
+node_modules/
+
+# Build / distribución
+dist/
+out/
+
+# Variables de entorno y credenciales
+.env
+.env.*
+!.env.example
+firebase-service-account.json
+*firebase-adminsdk*.json
+
+# Base de datos local (contiene datos de usuarios reales)
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+npm-debug.log*
+
+# Sistema operativo / editor
+.DS_Store
+Thumbs.db
+.vscode/

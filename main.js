@@ -1,0 +1,630 @@
+// main.js
+require('dotenv').config();
+
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const path = require('path');
+const Database = require('better-sqlite3');
+const fs = require('fs');
+const crypto = require('crypto');
+const { v4: uuidv4 } = require('uuid');
+const admin = require('firebase-admin');
+const sharp = require('sharp');
+const bcrypt = require('bcrypt');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { autoUpdater } = require('electron-updater');
+
+let serviceAccount;
+try {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
+    serviceAccount = JSON.parse(Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 'base64').toString('utf-8'));
+  } else {
+    // Para desarrollo local: coloca tu archivo de credenciales de Firebase
+    // en la raíz del proyecto con este nombre exacto. Este archivo NUNCA debe subirse a git
+    // (ya está en .gitignore).
+    serviceAccount = require('./firebase-service-account.json');
+  }
+} catch (error) {
+  console.error("Error al cargar las credenciales de Firebase:", error.message);
+  serviceAccount = null;
+}
+
+if (serviceAccount) {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      storageBucket: process.env.FIREBASE_STORAGE_BUCKET
+    });
+} else {
+    console.error("No se pudo inicializar Firebase Admin SDK. Las credenciales son nulas.");
+}
+const firestoreDb = admin.firestore();
+const firebaseStorage = admin.storage();
+
+if (!process.env.GEMINI_API_KEY) {
+  console.error('ADVERTENCIA: No se encontró GEMINI_API_KEY en las variables de entorno. El asistente Gemini no funcionará hasta que la configures en tu archivo .env');
+}
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+
+
+
+let mainWindow;
+let db;
+const SALT_ROUNDS = 10;
+let chatListenerUnsubscribe = null; // Para detener el listener del chat
+
+function setupAutoUpdater() {
+  // No revisar actualizaciones en modo desarrollo (evita errores cuando no hay release publicado)
+  if (!app.isPackaged) return;
+
+  autoUpdater.autoDownload = true;
+
+  autoUpdater.on('update-available', (info) => {
+    console.log('Actualización disponible:', info.version);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('sync-status', { success: true, message: `Descargando actualización ${info.version}...` });
+    }
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    console.log('La aplicación está actualizada.');
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.error('Error en autoUpdater:', err.message);
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'Actualización lista',
+      message: `Se descargó la versión ${info.version}. ¿Reiniciar ahora para instalarla?`,
+      buttons: ['Reiniciar ahora', 'Más tarde']
+    }).then(result => {
+      if (result.response === 0) {
+        autoUpdater.quitAndInstall();
+      }
+    });
+  });
+
+  autoUpdater.checkForUpdates();
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    minWidth: 1000,
+    minHeight: 600,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  mainWindow.loadFile('index.html');
+}
+
+function addColumnIfNotExists(tableName, columnName, columnType, defaultValue) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  const hasColumn = columns.some(col => col.name === columnName);
+  if (!hasColumn) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnType} DEFAULT ${defaultValue}`);
+    console.log(`Added '${columnName}' column to '${tableName}' table.`);
+  }
+}
+
+async function deleteOldFirestoreChatMessages() {
+    const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+    const chatRef = firestoreDb.collection('chat_messages');
+    const oldMessagesSnapshot = await chatRef.where('timestamp', '<', oneDayAgo).get();
+
+    if (oldMessagesSnapshot.empty) {
+        console.log('No hay mensajes de chat antiguos para eliminar de Firestore.');
+        return;
+    }
+
+    const batch = firestoreDb.batch();
+    oldMessagesSnapshot.forEach(doc => {
+        batch.delete(doc.ref);
+    });
+
+    await batch.commit();
+    console.log(`${oldMessagesSnapshot.size} mensajes de chat antiguos eliminados de Firestore.`);
+}
+
+
+function setupChatListener() {
+    if (chatListenerUnsubscribe) {
+        chatListenerUnsubscribe(); // Detener listener anterior si existe
+    }
+    const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+    const chatQuery = firestoreDb.collection('chat_messages')
+                                 .where('timestamp', '>=', oneDayAgo)
+                                 .orderBy('timestamp', 'asc');
+
+    chatListenerUnsubscribe = chatQuery.onSnapshot(snapshot => {
+        const messages = [];
+        snapshot.forEach(doc => {
+            messages.push({ id: doc.id, ...doc.data() });
+        });
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat-messages-update', messages);
+        }
+    }, err => {
+        console.error('Error en el listener del chat de Firestore:', err);
+    });
+}
+
+
+async function compressImage(inputPath) {
+    const tempPath = path.join(app.getPath('temp'), `${uuidv4()}.webp`);
+    await sharp(inputPath)
+        .resize(800)
+        .webp({ quality: 80 })
+        .toFile(tempPath);
+    return tempPath;
+}
+
+async function uploadImageToFirebase(localImagePath) {
+    if (!localImagePath) return null;
+    try {
+        const compressedImagePath = await compressImage(localImagePath);
+        const bucket = firebaseStorage.bucket();
+        const firebasePath = `notes/images/${path.basename(compressedImagePath)}`;
+        await bucket.upload(compressedImagePath, {
+            destination: firebasePath,
+            metadata: { contentType: 'image/webp' }
+        });
+        fs.unlinkSync(compressedImagePath);
+        const file = bucket.file(firebasePath);
+        const [url] = await file.getSignedUrl({ action: 'read', expires: '03-09-2491' });
+        return url;
+    } catch (err) {
+        console.error('Error al subir la imagen a Firebase Storage:', err);
+        return null;
+    }
+}
+
+async function deleteImageFromFirebase(url) {
+    if (!url) return;
+    try {
+        const bucket = firebaseStorage.bucket();
+        const filePath = url.split("?")[0].split("/o/")[1];
+        const file = bucket.file(decodeURIComponent(filePath));
+        await file.delete();
+    } catch (err) {
+        console.error('Error al eliminar la imagen de Firebase Storage:', err);
+    }
+}
+
+async function downloadAndConcileData() {
+    console.log('Descargando y conciliando datos de Firestore...');
+    const collections = ['links', 'notes', 'queries', 'users', 'favorites'];
+    try {
+        for (const collectionName of collections) {
+            const collectionRef = firestoreDb.collection(collectionName);
+            const snapshot = await collectionRef.get();
+            if (snapshot.empty) continue;
+
+            db.transaction(() => {
+                snapshot.forEach(doc => {
+                    const remoteData = { id: doc.id, ...doc.data() };
+                    delete remoteData.isFavorite; 
+                    
+                    const localItem = db.prepare(`SELECT * FROM ${collectionName} WHERE id = ?`).get(remoteData.id);
+                    if (!remoteData.lastModified) remoteData.lastModified = Date.now();
+                    
+                    if (!localItem) {
+                        if (!remoteData.isDeleted) {
+                            const columns = Object.keys(remoteData).join(', ');
+                            const placeholders = Object.keys(remoteData).map(() => '?').join(', ');
+                            db.prepare(`INSERT OR REPLACE INTO ${collectionName} (${columns}) VALUES (${placeholders})`).run(...Object.values(remoteData));
+                        }
+                    } else if (remoteData.lastModified > localItem.lastModified) {
+                        if (remoteData.isDeleted) {
+                            db.prepare(`DELETE FROM ${collectionName} WHERE id = ?`).run(remoteData.id);
+                        } else {
+                            const setStatements = Object.keys(remoteData).map(key => `${key} = ?`).join(', ');
+                            db.prepare(`UPDATE ${collectionName} SET ${setStatements} WHERE id = ?`).run(...Object.values(remoteData), remoteData.id);
+                        }
+                    }
+                });
+            })();
+        }
+    } catch (error) {
+        console.error('Error en la descarga y conciliación:', error);
+    }
+}
+
+async function uploadLocalChanges() {
+    console.log('Subiendo cambios locales a Firestore...');
+    const collections = ['links', 'notes', 'queries', 'users', 'favorites'];
+    try {
+        for (const collectionName of collections) {
+            const localItems = db.prepare(`SELECT * FROM ${collectionName}`).all();
+            const collectionRef = firestoreDb.collection(collectionName);
+            for (const item of localItems) {
+                const docRef = collectionRef.doc(item.id || `${item.itemId}-${item.userId}`);
+                const firestoreItem = await docRef.get();
+                if (!firestoreItem.exists) {
+                    await docRef.set(item);
+                } else {
+                    const remoteData = firestoreItem.data();
+                    if (!remoteData.lastModified || item.lastModified > remoteData.lastModified) {
+                        await docRef.set(item, { merge: true });
+                        if (item.isDeleted && collectionName === 'notes' && item.imagePath) {
+                            await deleteImageFromFirebase(item.imagePath);
+                        }
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Error subiendo cambios locales:', error);
+    }
+}
+
+async function syncDataWithFirebase() {
+    console.log('Iniciando sincronización bidireccional...');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('sync-status', { success: false, message: 'Sincronizando...' });
+    }
+    try {
+        await downloadAndConcileData();
+        await uploadLocalChanges();
+        console.log('Sincronización completada.');
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('sync-status', { success: true, message: 'Datos sincronizados con Firebase.' });
+            const session = db.prepare('SELECT user_id, role FROM sessions LIMIT 1').get();
+            if (session) {
+                sendDataToRenderer(session.user_id, session.role);
+            }
+        }
+    } catch (err) {
+        console.error('Error fatal durante la sincronización:', err.message);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('sync-status', { success: false, message: 'Error al sincronizar. Trabajando localmente.' });
+        }
+    }
+}
+
+function initializeDatabase() {
+  const userDataPath = app.getPath('userData');
+  const dbPath = path.join(userDataPath, 'app_data.db');
+  if (!fs.existsSync(userDataPath)) fs.mkdirSync(userDataPath, { recursive: true });
+
+  try {
+    db = new Database(dbPath);
+    console.log('Conectado a la base de datos SQLite en:', dbPath);
+
+    // --- Schema Definition ---
+    db.exec(`CREATE TABLE IF NOT EXISTS favorites (
+        id TEXT PRIMARY KEY,
+        itemId TEXT NOT NULL,
+        userId TEXT NOT NULL,
+        itemType TEXT NOT NULL,
+        lastModified INTEGER
+    )`);
+
+    db.exec(`CREATE TABLE IF NOT EXISTS links (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL,
+      createdAt INTEGER NOT NULL, lastModified INTEGER NOT NULL, isDeleted INTEGER DEFAULT 0,
+      category TEXT DEFAULT 'General', ownerId TEXT, visibility TEXT DEFAULT 'public'
+    )`);
+     addColumnIfNotExists('links', 'category', 'TEXT', "'General'");
+     addColumnIfNotExists('links', 'ownerId', 'TEXT', 'NULL');
+     addColumnIfNotExists('links', 'visibility', 'TEXT', "'public'");
+
+    db.exec(`CREATE TABLE IF NOT EXISTS notes (
+      id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL, imagePath TEXT,
+      createdAt INTEGER NOT NULL, lastModified INTEGER NOT NULL, isDeleted INTEGER DEFAULT 0,
+      category TEXT DEFAULT 'General', ownerId TEXT, visibility TEXT DEFAULT 'public'
+    )`);
+    addColumnIfNotExists('notes', 'category', 'TEXT', "'General'");
+    addColumnIfNotExists('notes', 'ownerId', 'TEXT', 'NULL');
+    addColumnIfNotExists('notes', 'visibility', 'TEXT', "'public'");
+
+    db.exec(`CREATE TABLE IF NOT EXISTS queries (
+      id TEXT PRIMARY KEY, title TEXT NOT NULL, queryContent TEXT NOT NULL,
+      createdAt INTEGER NOT NULL, lastModified INTEGER NOT NULL, isDeleted INTEGER DEFAULT 0,
+      category TEXT DEFAULT 'General', ownerId TEXT, visibility TEXT DEFAULT 'public'
+    )`);
+    addColumnIfNotExists('queries', 'category', 'TEXT', "'General'");
+    addColumnIfNotExists('queries', 'ownerId', 'TEXT', 'NULL');
+    addColumnIfNotExists('queries', 'visibility', 'TEXT', "'public'");
+
+    db.prepare("UPDATE links SET category = 'General' WHERE category IS NULL").run();
+    db.prepare("UPDATE notes SET category = 'General' WHERE category IS NULL").run();
+    db.prepare("UPDATE queries SET category = 'SICAR 4' WHERE category IS NULL").run();
+    db.prepare("UPDATE links SET visibility = 'public' WHERE visibility IS NULL").run();
+    db.prepare("UPDATE notes SET visibility = 'public' WHERE visibility IS NULL").run();
+    db.prepare("UPDATE queries SET visibility = 'public' WHERE visibility IS NULL").run();
+
+    db.exec(`CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, password TEXT NOT NULL, role TEXT NOT NULL,
+      birthDate TEXT, status TEXT DEFAULT 'approved', lastModified INTEGER NOT NULL DEFAULT 0, isDeleted INTEGER DEFAULT 0
+    )`);
+    addColumnIfNotExists('users', 'birthDate', 'TEXT', 'NULL');
+    addColumnIfNotExists('users', 'status', 'TEXT', "'approved'");
+    addColumnIfNotExists('users', 'lastModified', 'INTEGER', 0);
+    addColumnIfNotExists('users', 'isDeleted', 'INTEGER', 0);
+    
+    db.exec(`CREATE TABLE IF NOT EXISTS sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, role TEXT NOT NULL
+    )`);
+
+    const ADMIN_USERNAME = process.env.DEFAULT_ADMIN_USERNAME || 'admin';
+    const existingAdmin = db.prepare('SELECT * FROM users WHERE username = ?').get(ADMIN_USERNAME);
+    if (!existingAdmin) {
+      // Si no defines DEFAULT_ADMIN_PASSWORD en tu .env, se genera una contraseña aleatoria
+      // y se imprime UNA sola vez en consola. Cámbiala desde la app en tu primer inicio de sesión.
+      const ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || crypto.randomBytes(9).toString('base64url');
+      const hashedPassword = bcrypt.hashSync(ADMIN_PASSWORD, SALT_ROUNDS);
+      const now = Date.now();
+      const ADMIN_USER_ID = '00000000-admin-0000-0000-000000000001';
+      db.prepare('INSERT INTO users (id, username, password, role, status, lastModified) VALUES (?, ?, ?, ?, ?, ?)').run(ADMIN_USER_ID, ADMIN_USERNAME, hashedPassword, 'admin', 'approved', now);
+      console.log(`Usuario admin por defecto "${ADMIN_USERNAME}" creado.`);
+      if (!process.env.DEFAULT_ADMIN_PASSWORD) {
+        console.log(`Contraseña generada automáticamente (guárdala, no se mostrará de nuevo): ${ADMIN_PASSWORD}`);
+      }
+    }
+
+  } catch (err) {
+    console.error('Error al inicializar la base de datos:', err.message);
+  }
+}
+
+function getDataForUser(dataType, userId, userRole) {
+    let query;
+    if (userRole === 'visor') {
+        query = `SELECT * FROM ${dataType} WHERE isDeleted = 0 AND visibility = 'public'`;
+    } else {
+        query = `SELECT * FROM ${dataType} WHERE isDeleted = 0 AND (visibility = 'public' OR ownerId = '${userId}')`;
+    }
+    const data = db.prepare(query).all();
+    const favorites = db.prepare('SELECT itemId FROM favorites WHERE userId = ?').all(userId).map(f => f.itemId);
+    return data.map(item => ({
+        ...item,
+        isFavorite: favorites.includes(item.id)
+    }));
+}
+
+function sendDataToRenderer(userId, userRole) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('update-links', getDataForUser('links', userId, userRole));
+        mainWindow.webContents.send('update-notes', getDataForUser('notes', userId, userRole));
+        mainWindow.webContents.send('update-queries', getDataForUser('queries', userId, userRole));
+    }
+}
+
+// --- IPC Handlers ---
+ipcMain.handle('login', async (event, { username, password, rememberMe }) => {
+    const user = db.prepare('SELECT * FROM users WHERE username = ? AND isDeleted = 0').get(username);
+    if (user && bcrypt.compareSync(password, user.password)) {
+        if (user.status === 'approved') {
+            db.prepare('DELETE FROM sessions').run();
+            if (rememberMe) {
+                db.prepare('INSERT INTO sessions (user_id, role) VALUES (?, ?)').run(user.id, user.role);
+            }
+            setupChatListener(); // Iniciar el listener de chat después del login
+            return { success: true, role: user.role, userId: user.id, username: user.username };
+        }
+        return { success: false, message: 'Tu cuenta está pendiente de aprobación.' };
+    }
+    return { success: false, message: 'Usuario o contraseña incorrectos.' };
+});
+
+ipcMain.handle('get-initial-data', (event, { userId, userRole }) => {
+    sendDataToRenderer(userId, userRole);
+    return { success: true };
+});
+
+ipcMain.handle('toggle-favorite', (event, { itemId, userId, itemType }) => {
+    const favoriteId = `${itemId}-${userId}`;
+    const isFavorite = db.prepare('SELECT * FROM favorites WHERE id = ?').get(favoriteId);
+    if (isFavorite) {
+        db.prepare('DELETE FROM favorites WHERE id = ?').run(favoriteId);
+    } else {
+        db.prepare('INSERT INTO favorites (id, itemId, userId, itemType, lastModified) VALUES (?, ?, ?, ?, ?)').run(favoriteId, itemId, userId, itemType, Date.now());
+    }
+    const session = db.prepare('SELECT user_id, role FROM sessions LIMIT 1').get() || { user_id: userId, role: 'agente' }; // Fallback role
+    sendDataToRenderer(session.user_id, session.role); 
+    syncDataWithFirebase();
+    return { success: true };
+});
+
+// ==================================================================
+// == MODIFICACIÓN: Instrucción explícita para Gemini en modo local ==
+// ==================================================================
+ipcMain.handle('ask-gemini', async (event, { prompt, mode }) => {
+    try {
+        let finalPrompt = prompt;
+        if (mode === 'local') {
+            const links = db.prepare('SELECT name, url FROM links WHERE isDeleted = 0 GROUP BY name, url').all();
+            const notes = db.prepare('SELECT title, content FROM notes WHERE isDeleted = 0 GROUP BY title, content').all();
+            const queries = db.prepare('SELECT title, queryContent FROM queries WHERE isDeleted = 0 GROUP BY title, queryContent').all();
+            
+            let context = "Contexto local:\n";
+            context += "Enlaces:\n" + links.map(l => `- Nombre: ${l.name}, URL: ${l.url}`).join('\n');
+            context += "\n\nNotas:\n" + notes.map(n => `- Título: ${n.title}, Contenido: ${n.content.replace(/<[^>]*>/g, ' ')}`).join('\n');
+            context += "\n\nQueries:\n" + queries.map(q => `- Título: ${q.title}, Query: ${q.queryContent}`).join('\n');
+
+            // Instrucción clave para que Gemini formatee la respuesta
+            finalPrompt = `Basado en el siguiente contexto local, responde a la pregunta del usuario.
+            IMPORTANTE: Si tu respuesta se basa en uno o más elementos del contexto, debes mencionarlos usando el formato exacto @[Tipo: Nombre del elemento].
+            Los tipos pueden ser 'Enlace', 'Nota', o 'Query'. El nombre debe ser exacto al que aparece en el contexto.
+            Por ejemplo, si recomiendas un enlace llamado "Google", debes escribir en tu respuesta: @[Enlace: Google].
+            
+            Contexto:
+            ${context}
+            
+            Pregunta del usuario: ${prompt}`;
+        }
+
+        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+        const result = await model.generateContent(finalPrompt);
+        const response = await result.response;
+        return { success: true, text: response.text() };
+    } catch (err) {
+        console.error('Error asking Gemini:', err.message);
+        return { success: false, message: err.message };
+    }
+});
+
+ipcMain.handle('add-link', async (event, data) => {
+  const now = Date.now();
+  db.prepare('INSERT INTO links (id, name, url, createdAt, lastModified, category, ownerId, visibility) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(now.toString(), data.name, data.url, now, now, data.category, data.ownerId, data.visibility);
+  syncDataWithFirebase();
+});
+ipcMain.handle('update-link', async (event, data) => {
+  const ownerId = data.visibility === 'private' ? data.ownerId : null;
+  db.prepare('UPDATE links SET name = ?, url = ?, category = ?, visibility = ?, ownerId = ?, lastModified = ? WHERE id = ?')
+    .run(data.name, data.url, data.category, data.visibility, ownerId, Date.now(), data.id);
+  syncDataWithFirebase();
+});
+ipcMain.handle('delete-link', async (event, id) => {
+  db.prepare('UPDATE links SET isDeleted = 1, lastModified = ? WHERE id = ?').run(Date.now(), id);
+  syncDataWithFirebase();
+});
+
+ipcMain.handle('add-note', async (event, data) => {
+    const now = Date.now();
+    const imagePath = data.localImagePath ? await uploadImageToFirebase(data.localImagePath) : null;
+    db.prepare('INSERT INTO notes (id, title, content, imagePath, createdAt, lastModified, category, ownerId, visibility) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(now.toString(), data.title, data.content, imagePath, now, now, data.category, data.ownerId, data.visibility);
+    syncDataWithFirebase();
+});
+ipcMain.handle('update-note', async (event, data) => {
+    let imagePath = data.imagePath;
+    if (data.localImagePath && !data.localImagePath.startsWith('http')) imagePath = await uploadImageToFirebase(data.localImagePath);
+    const ownerId = data.visibility === 'private' ? data.ownerId : null;
+    db.prepare('UPDATE notes SET title = ?, content = ?, imagePath = ?, category = ?, visibility = ?, ownerId = ?, lastModified = ? WHERE id = ?')
+      .run(data.title, data.content, imagePath, data.category, data.visibility, ownerId, Date.now(), data.id);
+    syncDataWithFirebase();
+});
+ipcMain.handle('delete-note', async (event, id) => {
+  db.prepare('UPDATE notes SET isDeleted = 1, lastModified = ? WHERE id = ?').run(Date.now(), id);
+  syncDataWithFirebase();
+});
+
+ipcMain.handle('add-query', async (event, data) => {
+  const now = Date.now();
+  db.prepare('INSERT INTO queries (id, title, queryContent, createdAt, lastModified, category, ownerId, visibility) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(now.toString(), data.title, data.queryContent, now, now, data.category, data.ownerId, data.visibility);
+  syncDataWithFirebase();
+});
+ipcMain.handle('update-query', async (event, data) => {
+  const ownerId = data.visibility === 'private' ? data.ownerId : null;
+  db.prepare('UPDATE queries SET title = ?, queryContent = ?, category = ?, visibility = ?, ownerId = ?, lastModified = ? WHERE id = ?')
+    .run(data.title, data.queryContent, data.category, data.visibility, ownerId, Date.now(), data.id);
+  syncDataWithFirebase();
+});
+ipcMain.handle('delete-query', async (event, id) => {
+  db.prepare('UPDATE queries SET isDeleted = 1, lastModified = ? WHERE id = ?').run(Date.now(), id);
+  syncDataWithFirebase();
+});
+
+ipcMain.handle('request-access', (event, data) => {
+    const existingUser = db.prepare('SELECT * FROM users WHERE username = ?').get(data.username);
+    if (existingUser) return { success: false, message: 'El nombre de usuario ya existe.' };
+    const hashedPassword = bcrypt.hashSync(data.password, SALT_ROUNDS);
+    db.prepare('INSERT INTO users (id, username, password, role, birthDate, status, lastModified) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(uuidv4(), data.username, hashedPassword, 'agente', data.birthDate, 'pending', Date.now());
+    syncDataWithFirebase();
+    return { success: true };
+});
+ipcMain.handle('get-users', () => db.prepare('SELECT id, username, role, status FROM users WHERE isDeleted = 0').all());
+ipcMain.handle('add-user', (event, userData) => {
+    const hashedPassword = bcrypt.hashSync(userData.password, SALT_ROUNDS);
+    db.prepare('INSERT INTO users (id, username, password, role, status, lastModified) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(uuidv4(), userData.username, hashedPassword, userData.role, 'approved', Date.now());
+    syncDataWithFirebase();
+    return { success: true };
+});
+ipcMain.handle('update-user', (event, userData) => {
+    if (userData.password) {
+        const hashedPassword = bcrypt.hashSync(userData.password, SALT_ROUNDS);
+        db.prepare('UPDATE users SET role = ?, password = ?, lastModified = ? WHERE id = ?').run(userData.role, hashedPassword, Date.now(), userData.id);
+    } else {
+        db.prepare('UPDATE users SET role = ?, lastModified = ? WHERE id = ?').run(userData.role, Date.now(), userData.id);
+    }
+    syncDataWithFirebase();
+    return { success: true };
+});
+ipcMain.handle('approve-user', (event, id) => {
+    db.prepare("UPDATE users SET status = 'approved', lastModified = ? WHERE id = ?").run(Date.now(), id);
+    syncDataWithFirebase();
+    return { success: true };
+});
+ipcMain.handle('decline-user', (event, id) => {
+    db.prepare("UPDATE users SET isDeleted = 1, lastModified = ? WHERE id = ?").run(Date.now(), id);
+    syncDataWithFirebase();
+    return { success: true };
+});
+ipcMain.handle('delete-user', (event, id) => {
+    db.prepare('UPDATE users SET isDeleted = 1, lastModified = ? WHERE id = ?').run(Date.now(), id);
+    syncDataWithFirebase();
+    return { success: true };
+});
+ipcMain.handle('reset-password', (event, data) => {
+    const user = db.prepare('SELECT * FROM users WHERE username = ? AND birthDate = ? AND isDeleted = 0').get(data.username, data.birthDate);
+    if (!user) return { success: false, message: 'Usuario o fecha de nacimiento incorrectos.' };
+    const hashedPassword = bcrypt.hashSync(data.newPassword, SALT_ROUNDS);
+    db.prepare('UPDATE users SET password = ?, lastModified = ? WHERE id = ?').run(hashedPassword, Date.now(), user.id);
+    syncDataWithFirebase();
+    return { success: true };
+});
+
+ipcMain.handle('get-session', () => {
+    const session = db.prepare('SELECT s.user_id, s.role, u.username FROM sessions s JOIN users u ON s.user_id = u.id LIMIT 1').get();
+    if (session) {
+        setupChatListener(); // Re-iniciar listener si hay sesión guardada
+        return { success: true, role: session.role, userId: session.user_id, username: session.username };
+    }
+    return { success: false };
+});
+ipcMain.handle('clear-session', () => {
+    if (chatListenerUnsubscribe) {
+        chatListenerUnsubscribe();
+        chatListenerUnsubscribe = null;
+    }
+    db.prepare('DELETE FROM sessions').run()
+});
+ipcMain.handle('manual-sync', async () => syncDataWithFirebase());
+ipcMain.handle('print-note', () => mainWindow.webContents.print({}));
+
+// Chat IPC Handlers
+ipcMain.handle('send-chat-message-to-firebase', async (event, { userId, username, message }) => {
+    try {
+        await firestoreDb.collection('chat_messages').add({
+            userId,
+            username,
+            message,
+            timestamp: Date.now()
+        });
+        return { success: true };
+    } catch (err) {
+        console.error('Error al enviar mensaje de chat a Firestore:', err);
+        return { success: false, message: err.message };
+    }
+});
+
+
+app.whenReady().then(async () => {
+  initializeDatabase();
+  await deleteOldFirestoreChatMessages(); // Clean up old messages on startup
+  createWindow();
+  setupAutoUpdater();
+  mainWindow.webContents.on('did-finish-load', () => {
+    // Initial data load is now triggered by login or session check
+  });
+  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+});
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('before-quit', () => { 
+    if (chatListenerUnsubscribe) {
+        chatListenerUnsubscribe();
+    }
+    if (db) db.close(); 
+});
