@@ -40,6 +40,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const settingsBtn = document.getElementById('settingsBtn'), settingsModal = document.getElementById('settingsModal'), closeSettingsModalBtn = document.getElementById('closeSettingsModalBtn'), saveSettingsBtn = document.getElementById('saveSettingsBtn');
     const settingDefaultSection = document.getElementById('settingDefaultSection'), settingSearchMode = document.getElementById('settingSearchMode'), settingDarkMode = document.getElementById('settingDarkMode'), settingOpenAtLogin = document.getElementById('settingOpenAtLogin');
     const appVersionLabel = document.getElementById('appVersionLabel');
+    const copyDateModal = document.getElementById('copyDateModal'), copyDateModalBody = document.getElementById('copyDateModalBody');
+    const copyDateReplaceBtn = document.getElementById('copyDateReplaceBtn'), copyDateAsIsBtn = document.getElementById('copyDateAsIsBtn'), copyDateCancelBtn = document.getElementById('copyDateCancelBtn');
     
     // Chat UI Elements
     const chatToggleButton = document.getElementById('chatToggleButton'), chatNotification = document.getElementById('chatNotification'), chatWindow = document.getElementById('chatWindow'), closeChatBtn = document.getElementById('closeChatBtn'), chatMessages = document.getElementById('chatMessages'), chatInput = document.getElementById('chatInput'), sendChatBtn = document.getElementById('sendChatBtn'), emojiBtn = document.getElementById('emojiBtn'), mentionSuggestions = document.getElementById('mentionSuggestions'), muteChatBtn = document.getElementById('muteChatBtn');
@@ -109,6 +111,95 @@ document.addEventListener('DOMContentLoaded', async () => {
             showMessage("Error al copiar.", true);
         }
     }
+
+    // --- Detección de fechas en Queries (para el modal de copiar con fecha) ---
+    function todayStr() {
+        return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    }
+
+    // Revisa una query y decide si necesita fecha(s) antes de copiarla.
+    // Prioridad: 1) marcadores {FECHA_INICIO}/{FECHA_FIN} o {FECHA}. 2) fechas ya escritas en el texto (YYYY-MM-DD).
+    // Devuelve null si no hay nada que reemplazar (se copia tal cual, sin modal).
+    function detectDateFields(text) {
+        if (!text) return null;
+        if (text.includes('{FECHA_INICIO}') && text.includes('{FECHA_FIN}')) {
+            return { mode: 'range', kind: 'marker' };
+        }
+        if (text.includes('{FECHA}')) {
+            return { mode: 'single', kind: 'marker' };
+        }
+        const found = [...new Set(text.match(/\b\d{4}-\d{2}-\d{2}\b/g) || [])];
+        if (found.length >= 2) {
+            return { mode: 'range', kind: 'auto', original: [found[0], found[1]] };
+        }
+        if (found.length === 1) {
+            return { mode: 'single', kind: 'auto', original: found[0] };
+        }
+        return null;
+    }
+
+    // Aplica las fechas elegidas por el usuario sobre el texto original de la query.
+    function buildQueryWithDates(text, detection, values) {
+        if (!detection) return text;
+        if (detection.kind === 'marker') {
+            if (detection.mode === 'range') {
+                return text.split('{FECHA_INICIO}').join(values.start).split('{FECHA_FIN}').join(values.end);
+            }
+            return text.split('{FECHA}').join(values.date);
+        }
+        // Detección automática: reemplaza cada aparición de la fecha original encontrada.
+        if (detection.mode === 'range') {
+            return text.split(detection.original[0]).join(values.start).split(detection.original[1]).join(values.end);
+        }
+        return text.split(detection.original).join(values.date);
+    }
+
+    let pendingCopyText = null;
+    let pendingCopyDetection = null;
+
+    function openCopyDateModal(text, detection) {
+        pendingCopyText = text;
+        pendingCopyDetection = detection;
+        if (detection.mode === 'range') {
+            const startVal = detection.kind === 'auto' ? detection.original[0] : todayStr();
+            const endVal = detection.kind === 'auto' ? detection.original[1] : todayStr();
+            copyDateModalBody.innerHTML = `
+                <label class="block text-sm font-medium text-gray-700 mb-1">Desde</label>
+                <input type="date" id="copyDateStart" class="w-full p-2 border rounded-lg mb-3 text-sm" value="${startVal}">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Hasta</label>
+                <input type="date" id="copyDateEnd" class="w-full p-2 border rounded-lg text-sm" value="${endVal}">
+            `;
+        } else {
+            const val = detection.kind === 'auto' ? detection.original : todayStr();
+            copyDateModalBody.innerHTML = `
+                <label class="block text-sm font-medium text-gray-700 mb-1">Fecha</label>
+                <input type="date" id="copyDateSingle" class="w-full p-2 border rounded-lg text-sm" value="${val}">
+            `;
+        }
+        openModal(copyDateModal);
+    }
+
+    copyDateReplaceBtn.addEventListener('click', () => {
+        if (!pendingCopyDetection) return;
+        let values;
+        if (pendingCopyDetection.mode === 'range') {
+            const start = document.getElementById('copyDateStart').value;
+            const end = document.getElementById('copyDateEnd').value;
+            if (!start || !end) { showMessage('Selecciona ambas fechas.', true); return; }
+            values = { start, end };
+        } else {
+            const date = document.getElementById('copyDateSingle').value;
+            if (!date) { showMessage('Selecciona una fecha.', true); return; }
+            values = { date };
+        }
+        copyToClipboard(buildQueryWithDates(pendingCopyText, pendingCopyDetection, values));
+        closeModal(copyDateModal);
+    });
+    copyDateAsIsBtn.addEventListener('click', () => {
+        if (pendingCopyText != null) copyToClipboard(pendingCopyText);
+        closeModal(copyDateModal);
+    });
+    copyDateCancelBtn.addEventListener('click', () => closeModal(copyDateModal));
 
     // --- Modals ---
     function openModal(modal) { modal.classList.remove('hidden'); }
@@ -408,7 +499,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             } else if (item.queryContent) { // Query
                 iconHtml = '<i class="fas fa-database text-purple-500 mr-3"></i>';
                 contentHtml = `<div><div class="flex items-center">${privateIcon}${categoryBadge}<p class="font-medium text-gray-900 truncate">${item.title}</p></div><pre class="text-gray-700 text-xs max-h-12 overflow-hidden bg-gray-100 p-1 rounded-md font-mono ml-8">${item.queryContent}</pre></div>`;
-                copyButtonHtml = `<button class="copy-btn p-2 bg-purple-500 text-white rounded-full hover:bg-purple-600 shadow-sm" data-content="${escapeAttr(item.queryContent)}" title="Copiar Query"><i class="fas fa-copy"></i></button>`;
+                copyButtonHtml = `<button class="copy-btn p-2 bg-purple-500 text-white rounded-full hover:bg-purple-600 shadow-sm" data-type="query" data-content="${escapeAttr(item.queryContent)}" title="Copiar Query"><i class="fas fa-copy"></i></button>`;
             } else { // Note
                 iconHtml = '<i class="fas fa-clipboard-list text-green-500 mr-3"></i>';
                 contentHtml = `<div><div class="flex items-center">${privateIcon}${categoryBadge}<p class="font-medium text-gray-900 truncate">${item.title}</p></div><div class="text-gray-700 text-xs max-h-12 overflow-hidden ml-8">${item.content}</div></div>`;
@@ -542,7 +633,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         const type = button.dataset.type;
 
         if (button.classList.contains('copy-btn')) {
-            copyToClipboard(button.dataset.content);
+            const text = button.dataset.content;
+            if (button.dataset.type === 'query') {
+                const detection = detectDateFields(text);
+                if (detection) {
+                    openCopyDateModal(text, detection);
+                } else {
+                    copyToClipboard(text);
+                }
+            } else {
+                copyToClipboard(text);
+            }
         } else if (button.classList.contains('view-note-btn')) {
             const item = allNotes.find(i => i.id == id);
             if (item) {
