@@ -1,6 +1,6 @@
 {
   "name": "gestor-de-enlaces-electron",
-  "version": "10.11.5",
+  "version": "10.11.6",
   "description": "Una aplicación de escritorio Electron para gestionar enlaces con better-sqlite3, roles de usuario y Gemini.",
   "main": "main.js",
   "scripts": {
