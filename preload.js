@@ -38,6 +38,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateQuery: (data) => ipcRenderer.invoke('update-query', data),
   deleteQuery: (id) => ipcRenderer.invoke('delete-query', id),
   onUpdateQueries: (callback) => ipcRenderer.on('update-queries', (event, queries) => callback(queries)),
+
+  // Grupos
+  getGroups: () => ipcRenderer.invoke('get-groups'),
+  addGroup: (data) => ipcRenderer.invoke('add-group', data),
+  deleteGroup: (id) => ipcRenderer.invoke('delete-group', { id }),
+  addItemToGroup: (data) => ipcRenderer.invoke('add-item-to-group', data),
+  removeItemFromGroup: (data) => ipcRenderer.invoke('remove-item-from-group', data),
+  togglePinInGroup: (data) => ipcRenderer.invoke('toggle-pin-in-group', data),
+  onUpdateGroups: (callback) => ipcRenderer.on('update-groups', (event, groups) => callback(groups)),
   
   // Gestión de Sesión
   getSession: () => ipcRenderer.invoke('get-session'),

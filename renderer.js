@@ -24,7 +24,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const forgotPasswordModal = document.getElementById('forgotPasswordModal'), forgotUsername = document.getElementById('forgotUsername'), forgotBirthDate = document.getElementById('forgotBirthDate'), newPasswordReset = document.getElementById('newPasswordReset'), resetPasswordBtn = document.getElementById('resetPasswordBtn'), cancelResetBtn = document.getElementById('cancelResetBtn');
     const sidebar = document.getElementById('sidebar'), mainContent = document.getElementById('mainContent'), logoutBtn = document.getElementById('logoutBtn');
     const linksBtn = document.getElementById('linksBtn'), notesBtn = document.getElementById('notesBtn'), queriesBtn = document.getElementById('queriesBtn'), globalBtn = document.getElementById('globalBtn'), favoritesBtn = document.getElementById('favoritesBtn'), usersBtn = document.getElementById('usersBtn'), syncBtn = document.getElementById('syncBtn');
-    const linksSection = document.getElementById('linksSection'), notesSection = document.getElementById('notesSection'), queriesSection = document.getElementById('queriesSection'), globalSection = document.getElementById('globalSection'), favoritesSection = document.getElementById('favoritesSection'), usersSection = document.getElementById('usersSection');
+    const linksSection = document.getElementById('linksSection'), notesSection = document.getElementById('notesSection'), queriesSection = document.getElementById('queriesSection'), globalSection = document.getElementById('globalSection'), groupsSection = document.getElementById('groupsSection'), favoritesSection = document.getElementById('favoritesSection'), usersSection = document.getElementById('usersSection');
     const linksList = document.getElementById('linksList'), notesList = document.getElementById('notesList'), queriesList = document.getElementById('queriesList'), globalList = document.getElementById('globalList'), favoritesList = document.getElementById('favoritesList');
     const searchLinksBar = document.getElementById('searchLinksBar'), searchNotesBar = document.getElementById('searchNotesBar'), searchQueriesBar = document.getElementById('searchQueriesBar'), searchGlobalBar = document.getElementById('searchGlobalBar');
     const openAddLinkModalBtn = document.getElementById('openAddLinkModalBtn'), openAddNoteModalBtn = document.getElementById('openAddNoteModalBtn'), openAddQueryModalBtn = document.getElementById('openAddQueryModalBtn');
@@ -42,6 +42,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     const appVersionLabel = document.getElementById('appVersionLabel');
     const copyDateModal = document.getElementById('copyDateModal'), copyDateModalBody = document.getElementById('copyDateModalBody');
     const copyDateReplaceBtn = document.getElementById('copyDateReplaceBtn'), copyDateAsIsBtn = document.getElementById('copyDateAsIsBtn'), copyDateCancelBtn = document.getElementById('copyDateCancelBtn');
+    const groupsBtn = document.getElementById('groupsBtn'), groupsListView = document.getElementById('groupsListView'), groupDetailView = document.getElementById('groupDetailView');
+    const groupsListContainer = document.getElementById('groupsListContainer'), openNewGroupFormBtn = document.getElementById('openNewGroupFormBtn'), newGroupFormContainer = document.getElementById('newGroupFormContainer'), newGroupNameInput = document.getElementById('newGroupNameInput'), confirmNewGroupBtn = document.getElementById('confirmNewGroupBtn');
+    const groupsBackBtn = document.getElementById('groupsBackBtn'), groupDetailTitle = document.getElementById('groupDetailTitle'), groupSearchInput = document.getElementById('groupSearchInput'), groupSearchSuggestions = document.getElementById('groupSearchSuggestions'), groupDetailItemsList = document.getElementById('groupDetailItemsList');
+    let allGroups = [];
+    let currentOpenGroupId = null;
     
     // Chat UI Elements
     const chatToggleButton = document.getElementById('chatToggleButton'), chatNotification = document.getElementById('chatNotification'), chatWindow = document.getElementById('chatWindow'), closeChatBtn = document.getElementById('closeChatBtn'), chatMessages = document.getElementById('chatMessages'), chatInput = document.getElementById('chatInput'), sendChatBtn = document.getElementById('sendChatBtn'), emojiBtn = document.getElementById('emojiBtn'), mentionSuggestions = document.getElementById('mentionSuggestions'), muteChatBtn = document.getElementById('muteChatBtn');
@@ -67,9 +72,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function showSection(sectionId) {
-        [linksSection, notesSection, queriesSection, globalSection, favoritesSection, usersSection].forEach(s => s.classList.add('hidden'));
+        [linksSection, notesSection, queriesSection, globalSection, groupsSection, favoritesSection, usersSection].forEach(s => s.classList.add('hidden'));
         document.getElementById(sectionId).classList.remove('hidden');
-        [linksBtn, notesBtn, queriesBtn, globalBtn, favoritesBtn, usersBtn].forEach(b => b.classList.remove('bg-blue-600'));
+        [linksBtn, notesBtn, queriesBtn, globalBtn, groupsBtn, favoritesBtn, usersBtn].forEach(b => b.classList.remove('bg-blue-600'));
         
         if (sectionId === 'linksSection') linksBtn.classList.add('bg-blue-600');
         else if (sectionId === 'notesSection') notesBtn.classList.add('bg-blue-600');
@@ -77,6 +82,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         else if (sectionId === 'globalSection') {
             globalBtn.classList.add('bg-blue-600');
             filterGlobal();
+        } else if (sectionId === 'groupsSection') {
+            groupsBtn.classList.add('bg-blue-600');
+            currentOpenGroupId = null;
+            groupDetailView.classList.add('hidden');
+            groupsListView.classList.remove('hidden');
+            renderGroupsList();
         } else if (sectionId === 'favoritesSection') {
             favoritesBtn.classList.add('bg-blue-600');
             displayFavorites();
@@ -459,13 +470,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         await electronAPI.getInitialData({ userId: currentUserId, userRole: currentUserRole });
     }
 
-    electronAPI.onUpdateLinks((links) => { allLinks = links; filterLinks(); filterGlobal(); updateFavoritesList(); });
-    electronAPI.onUpdateNotes((notes) => { allNotes = notes; filterNotes(); filterGlobal(); updateFavoritesList(); });
-    electronAPI.onUpdateQueries((queries) => { allQueries = queries; filterQueries(); filterGlobal(); updateFavoritesList(); });
+    function refreshGroupViewsIfVisible() {
+        if (!groupsSection.classList.contains('hidden')) {
+            if (currentOpenGroupId) renderGroupDetailItems();
+            else renderGroupsList();
+        }
+    }
+
+    electronAPI.onUpdateLinks((links) => { allLinks = links; filterLinks(); filterGlobal(); updateFavoritesList(); refreshGroupViewsIfVisible(); });
+    electronAPI.onUpdateNotes((notes) => { allNotes = notes; filterNotes(); filterGlobal(); updateFavoritesList(); refreshGroupViewsIfVisible(); });
+    electronAPI.onUpdateQueries((queries) => { allQueries = queries; filterQueries(); filterGlobal(); updateFavoritesList(); refreshGroupViewsIfVisible(); });
+    electronAPI.onUpdateGroups((groups) => { allGroups = groups; refreshGroupViewsIfVisible(); });
     electronAPI.onUpdateUsers((users) => { allUsers = users; if(currentUserRole === 'admin' && !usersSection.classList.contains('hidden')) { renderUsers(); } });
 
 
-    function renderItems(items, container, filterId) {
+    function renderItems(items, container, filterId, extraButtonFn) {
         const canEdit = ['admin', 'gestor'].includes(currentUserRole);
         const visibilityFilter = document.getElementById(filterId)?.value || 'all';
         
@@ -506,9 +525,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 copyButtonHtml = `<button class="view-note-btn p-2 bg-green-500 text-white rounded-full hover:bg-green-600 shadow-sm" data-id="${item.id}" title="Ver Nota"><i class="fas fa-eye"></i></button>`;
             }
 
+            const extraButtonHtml = extraButtonFn ? extraButtonFn(item) : '';
+
             return `<div class="flex items-center justify-between bg-white p-3 rounded-lg shadow-sm hover:shadow-md border-l-4 border-${categoryColor}-500">
                         <div class="flex items-center flex-1 min-w-0 mr-4">${iconHtml}<div class="flex-1 min-w-0">${contentHtml}</div></div>
-                        <div class="flex items-center space-x-1">${favBtn}${copyButtonHtml}${editButtonHtml}${deleteButtonHtml}</div>
+                        <div class="flex items-center space-x-1">${favBtn}${copyButtonHtml}${editButtonHtml}${deleteButtonHtml}${extraButtonHtml}</div>
                     </div>`;
         }).join('');
     }
@@ -597,6 +618,171 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         renderItems(results, globalList);
     }
+
+    // --- Grupos (etiquetas compartidas, muchos-a-muchos con enlaces/notas/queries) ---
+    function itemGroupIds(item) {
+        try { return JSON.parse(item.groups || '[]'); } catch (e) { return []; }
+    }
+    function itemType(item) {
+        return item.url ? 'link' : (item.queryContent ? 'query' : 'note');
+    }
+    function allItemsFlat() {
+        return [...allLinks, ...allNotes, ...allQueries];
+    }
+
+    function renderGroupsList() {
+        if (allGroups.length === 0) {
+            groupsListContainer.innerHTML = '<p class="text-sm text-gray-500 text-center py-6">Todavía no hay grupos. Crea el primero para empezar a organizar tus enlaces, notas y queries.</p>';
+            return;
+        }
+        const flat = allItemsFlat();
+        groupsListContainer.innerHTML = allGroups.map(g => {
+            const count = flat.filter(item => itemGroupIds(item).includes(g.id)).length;
+            const deleteBtn = currentUserRole === 'admin'
+                ? `<button class="delete-group-btn p-2 text-gray-400 hover:text-red-600" data-id="${g.id}" data-name="${escapeAttr(g.name)}" title="Eliminar grupo"><i class="fas fa-trash"></i></button>`
+                : '';
+            return `<div class="flex items-center justify-between bg-white p-3 rounded-lg shadow-sm hover:shadow-md border-l-4 border-indigo-400">
+                        <button class="open-group-btn flex-1 text-left" data-id="${g.id}">
+                            <p class="font-semibold text-gray-800">${g.name}</p>
+                            <p class="text-xs text-gray-500">${count} elemento${count === 1 ? '' : 's'}</p>
+                        </button>
+                        ${deleteBtn}
+                    </div>`;
+        }).join('');
+    }
+
+    function renderGroupDetailItems() {
+        if (!currentOpenGroupId) return;
+        const group = allGroups.find(g => g.id === currentOpenGroupId);
+        let pinnedIds = [];
+        try { pinnedIds = JSON.parse((group && group.pinnedItems) || '[]'); } catch (e) { pinnedIds = []; }
+
+        let items = allItemsFlat().filter(item => itemGroupIds(item).includes(currentOpenGroupId));
+        if (items.length === 0) {
+            groupDetailItemsList.innerHTML = '<p class="text-sm text-gray-500 text-center py-6">Este grupo todavía no tiene elementos. Búscalos arriba para agregarlos.</p>';
+            return;
+        }
+
+        // Los fijados van arriba, en el orden en que se fijaron (el primero fijado, primero en la lista).
+        items = items.slice().sort((a, b) => {
+            const ai = pinnedIds.indexOf(a.id), bi = pinnedIds.indexOf(b.id);
+            if (ai === -1 && bi === -1) return 0;
+            if (ai === -1) return 1;
+            if (bi === -1) return -1;
+            return ai - bi;
+        });
+
+        renderItems(items, groupDetailItemsList, null, (item) => {
+            const type = itemType(item);
+            const isPinned = pinnedIds.includes(item.id);
+            const pinBtn = `<button class="pin-in-group-btn p-1 rounded-full w-6 h-6 flex items-center justify-center ${isPinned ? 'bg-amber-400 text-white hover:bg-amber-500' : 'bg-gray-200 text-gray-500 hover:bg-amber-100 hover:text-amber-600'}" data-id="${item.id}" data-type="${type}" data-pinned="${isPinned}" title="${isPinned ? 'Quitar de fijados' : 'Fijar arriba en este grupo'}"><i class="fas fa-thumbtack"></i></button>`;
+            const removeBtn = `<button class="remove-from-group-btn p-1 bg-gray-200 text-gray-600 rounded-full hover:bg-red-100 hover:text-red-600 w-6 h-6 flex items-center justify-center" data-id="${item.id}" data-type="${type}" title="Quitar del grupo"><i class="fas fa-times"></i></button>`;
+            return pinBtn + removeBtn;
+        });
+    }
+
+    function openGroupDetail(groupId) {
+        const group = allGroups.find(g => g.id === groupId);
+        if (!group) return;
+        currentOpenGroupId = groupId;
+        groupDetailTitle.textContent = group.name;
+        groupSearchInput.value = '';
+        groupSearchSuggestions.classList.add('hidden');
+        groupSearchSuggestions.innerHTML = '';
+        renderGroupDetailItems();
+        groupsListView.classList.add('hidden');
+        groupDetailView.classList.remove('hidden');
+    }
+
+    groupsBackBtn.addEventListener('click', () => {
+        currentOpenGroupId = null;
+        groupDetailView.classList.add('hidden');
+        groupsListView.classList.remove('hidden');
+        renderGroupsList();
+    });
+
+    groupsListContainer.addEventListener('click', (e) => {
+        const openBtn = e.target.closest('.open-group-btn');
+        if (openBtn) { openGroupDetail(openBtn.dataset.id); return; }
+        const delBtn = e.target.closest('.delete-group-btn');
+        if (delBtn) {
+            openConfirmModal(async () => {
+                await electronAPI.deleteGroup(delBtn.dataset.id);
+                showMessage('Grupo eliminado.');
+            }, `¿Eliminar el grupo "${delBtn.dataset.name}"? Los elementos que contenía no se borran, solo dejan de estar agrupados ahí.`);
+        }
+    });
+
+    openNewGroupFormBtn.addEventListener('click', () => {
+        newGroupFormContainer.classList.toggle('hidden');
+        if (!newGroupFormContainer.classList.contains('hidden')) newGroupNameInput.focus();
+    });
+    confirmNewGroupBtn.addEventListener('click', async () => {
+        const name = newGroupNameInput.value.trim();
+        if (!name) { showMessage('Escribe un nombre para el grupo.', true); return; }
+        const result = await electronAPI.addGroup({ name });
+        if (result && result.success) {
+            newGroupNameInput.value = '';
+            newGroupFormContainer.classList.add('hidden');
+            showMessage('Grupo creado.');
+        } else {
+            showMessage((result && result.message) || 'No se pudo crear el grupo.', true);
+        }
+    });
+    newGroupNameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmNewGroupBtn.click(); });
+
+    // Buscador tipo "@" dentro de un grupo, para agregar enlaces/notas/queries existentes
+    groupSearchInput.addEventListener('input', () => {
+        const term = normalizeText(groupSearchInput.value.replace(/^@/, ''));
+        if (!term || !currentOpenGroupId) {
+            groupSearchSuggestions.classList.add('hidden');
+            groupSearchSuggestions.innerHTML = '';
+            return;
+        }
+        const alreadyIn = new Set(allItemsFlat().filter(i => itemGroupIds(i).includes(currentOpenGroupId)).map(i => i.id));
+        const matches = allItemsFlat()
+            .filter(item => !alreadyIn.has(item.id) && normalizeText(item.name || item.title).includes(term))
+            .slice(0, 8);
+        if (matches.length === 0) {
+            groupSearchSuggestions.innerHTML = '<div class="p-2 text-xs text-gray-500">Sin resultados</div>';
+        } else {
+            const iconClassFor = (type) => type === 'link' ? 'fa-link text-blue-500' : type === 'query' ? 'fa-database text-purple-500' : 'fa-clipboard-list text-green-500';
+            groupSearchSuggestions.innerHTML = matches.map(item => {
+                const type = itemType(item);
+                return `<div class="mention-item" data-id="${item.id}" data-type="${type}"><i class="fas ${iconClassFor(type)} mr-2"></i>${escapeAttr(item.name || item.title)}</div>`;
+            }).join('');
+        }
+        groupSearchSuggestions.classList.remove('hidden');
+    });
+
+    groupSearchSuggestions.addEventListener('click', async (e) => {
+        const el = e.target.closest('.mention-item');
+        if (!el || !currentOpenGroupId) return;
+        await electronAPI.addItemToGroup({ groupId: currentOpenGroupId, itemId: el.dataset.id, itemType: el.dataset.type, userId: currentUserId, userRole: currentUserRole });
+        groupSearchInput.value = '';
+        groupSearchSuggestions.classList.add('hidden');
+        groupSearchSuggestions.innerHTML = '';
+    });
+
+    document.addEventListener('click', (e) => {
+        if (!groupSearchSuggestions.classList.contains('hidden') && !groupSearchSuggestions.contains(e.target) && e.target !== groupSearchInput) {
+            groupSearchSuggestions.classList.add('hidden');
+        }
+    });
+
+    groupDetailItemsList.addEventListener('click', async (e) => {
+        if (!currentOpenGroupId) return;
+        const pinBtn = e.target.closest('.pin-in-group-btn');
+        if (pinBtn) {
+            const isPinned = pinBtn.dataset.pinned === 'true';
+            await electronAPI.togglePinInGroup({ groupId: currentOpenGroupId, itemId: pinBtn.dataset.id, pin: !isPinned });
+            return;
+        }
+        const removeBtn = e.target.closest('.remove-from-group-btn');
+        if (removeBtn) {
+            await electronAPI.removeItemFromGroup({ groupId: currentOpenGroupId, itemId: removeBtn.dataset.id, itemType: removeBtn.dataset.type, userId: currentUserId, userRole: currentUserRole });
+        }
+    });
 
     function displayFavorites() { renderItems(allFavorites, favoritesList); }
     function updateFavoritesList() {
@@ -822,6 +1008,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     notesBtn.addEventListener('click', () => showSection('notesSection'));
     queriesBtn.addEventListener('click', () => showSection('queriesSection'));
     globalBtn.addEventListener('click', () => showSection('globalSection'));
+    groupsBtn.addEventListener('click', () => showSection('groupsSection'));
     favoritesBtn.addEventListener('click', () => showSection('favoritesSection'));
     usersBtn.addEventListener('click', () => showSection('usersSection'));
 

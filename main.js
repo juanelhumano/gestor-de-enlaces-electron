@@ -1,8 +1,8 @@
 // main.js
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
-const path = require('path');
 const Database = require('better-sqlite3');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -208,7 +208,7 @@ async function deleteImageFromFirebase(url) {
 
 async function downloadAndConcileData() {
     console.log('Descargando y conciliando datos de Firestore...');
-    const collections = ['links', 'notes', 'queries', 'users', 'favorites'];
+    const collections = ['links', 'notes', 'queries', 'users', 'favorites', 'groups'];
     try {
         for (const collectionName of collections) {
             const collectionRef = firestoreDb.collection(collectionName);
@@ -247,7 +247,7 @@ async function downloadAndConcileData() {
 
 async function uploadLocalChanges() {
     console.log('Subiendo cambios locales a Firestore...');
-    const collections = ['links', 'notes', 'queries', 'users', 'favorites'];
+    const collections = ['links', 'notes', 'queries', 'users', 'favorites', 'groups'];
     try {
         for (const collectionName of collections) {
             const localItems = db.prepare(`SELECT * FROM ${collectionName}`).all();
@@ -349,6 +349,7 @@ function initializeDatabase() {
      addColumnIfNotExists('links', 'category', 'TEXT', "'General'");
      addColumnIfNotExists('links', 'ownerId', 'TEXT', 'NULL');
      addColumnIfNotExists('links', 'visibility', 'TEXT', "'public'");
+     addColumnIfNotExists('links', 'groups', 'TEXT', "'[]'");
 
     db.exec(`CREATE TABLE IF NOT EXISTS notes (
       id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL, imagePath TEXT,
@@ -358,6 +359,7 @@ function initializeDatabase() {
     addColumnIfNotExists('notes', 'category', 'TEXT', "'General'");
     addColumnIfNotExists('notes', 'ownerId', 'TEXT', 'NULL');
     addColumnIfNotExists('notes', 'visibility', 'TEXT', "'public'");
+    addColumnIfNotExists('notes', 'groups', 'TEXT', "'[]'");
 
     db.exec(`CREATE TABLE IF NOT EXISTS queries (
       id TEXT PRIMARY KEY, title TEXT NOT NULL, queryContent TEXT NOT NULL,
@@ -367,6 +369,7 @@ function initializeDatabase() {
     addColumnIfNotExists('queries', 'category', 'TEXT', "'General'");
     addColumnIfNotExists('queries', 'ownerId', 'TEXT', 'NULL');
     addColumnIfNotExists('queries', 'visibility', 'TEXT', "'public'");
+    addColumnIfNotExists('queries', 'groups', 'TEXT', "'[]'");
 
     db.prepare("UPDATE links SET category = 'General' WHERE category IS NULL").run();
     db.prepare("UPDATE notes SET category = 'General' WHERE category IS NULL").run();
@@ -374,6 +377,19 @@ function initializeDatabase() {
     db.prepare("UPDATE links SET visibility = 'public' WHERE visibility IS NULL").run();
     db.prepare("UPDATE notes SET visibility = 'public' WHERE visibility IS NULL").run();
     db.prepare("UPDATE queries SET visibility = 'public' WHERE visibility IS NULL").run();
+    db.prepare("UPDATE links SET groups = '[]' WHERE groups IS NULL").run();
+    db.prepare("UPDATE notes SET groups = '[]' WHERE groups IS NULL").run();
+    db.prepare("UPDATE queries SET groups = '[]' WHERE groups IS NULL").run();
+
+    // Grupos: etiquetas compartidas para todo el equipo, muchos-a-muchos con links/notas/queries
+    // (cada elemento guarda un arreglo JSON de ids de grupo en su columna 'groups').
+    db.exec(`CREATE TABLE IF NOT EXISTS groups (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL,
+      createdAt INTEGER NOT NULL, lastModified INTEGER NOT NULL, isDeleted INTEGER DEFAULT 0
+    )`);
+    // pinnedItems: arreglo JSON con los ids de los elementos fijados en ese grupo, en orden
+    // (el primero del arreglo es el que se muestra más arriba).
+    addColumnIfNotExists('groups', 'pinnedItems', 'TEXT', "'[]'");
 
     db.exec(`CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, password TEXT NOT NULL, role TEXT NOT NULL,
@@ -408,11 +424,26 @@ function getDataForUser(dataType, userId, userRole) {
     }));
 }
 
+function getGroupsData() {
+    return db.prepare('SELECT * FROM groups WHERE isDeleted = 0 ORDER BY name COLLATE NOCASE').all();
+}
+
+function sendGroupsToRenderer() {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('update-groups', getGroupsData());
+    }
+}
+
+function tableForItemType(itemType) {
+    return { link: 'links', note: 'notes', query: 'queries' }[itemType];
+}
+
 function sendDataToRenderer(userId, userRole) {
     if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('update-links', getDataForUser('links', userId, userRole));
         mainWindow.webContents.send('update-notes', getDataForUser('notes', userId, userRole));
         mainWindow.webContents.send('update-queries', getDataForUser('queries', userId, userRole));
+        sendGroupsToRenderer();
     }
 }
 
@@ -505,6 +536,83 @@ ipcMain.handle('update-link', async (event, data) => {
 ipcMain.handle('delete-link', async (event, id) => {
   db.prepare('UPDATE links SET isDeleted = 1, lastModified = ? WHERE id = ?').run(Date.now(), id);
   syncDataWithFirebase();
+});
+
+// --- Grupos (etiquetas compartidas, muchos-a-muchos con links/notas/queries) ---
+ipcMain.handle('get-groups', () => getGroupsData());
+
+ipcMain.handle('add-group', (event, { name }) => {
+  const trimmed = (name || '').trim();
+  if (!trimmed) return { success: false, message: 'El nombre del grupo no puede estar vacío.' };
+  const now = Date.now();
+  db.prepare('INSERT INTO groups (id, name, createdAt, lastModified, isDeleted) VALUES (?, ?, ?, ?, 0)').run(uuidv4(), trimmed, now, now);
+  sendGroupsToRenderer();
+  syncDataWithFirebase();
+  return { success: true };
+});
+
+ipcMain.handle('delete-group', (event, { id }) => {
+  db.prepare('UPDATE groups SET isDeleted = 1, lastModified = ? WHERE id = ?').run(Date.now(), id);
+  sendGroupsToRenderer();
+  syncDataWithFirebase();
+  return { success: true };
+});
+
+ipcMain.handle('add-item-to-group', (event, { groupId, itemId, itemType, userId, userRole }) => {
+  const table = tableForItemType(itemType);
+  if (!table) return { success: false };
+  const item = db.prepare(`SELECT groups FROM ${table} WHERE id = ?`).get(itemId);
+  if (!item) return { success: false };
+  let groupIds = [];
+  try { groupIds = JSON.parse(item.groups || '[]'); } catch (e) { groupIds = []; }
+  if (!groupIds.includes(groupId)) groupIds.push(groupId);
+  db.prepare(`UPDATE ${table} SET groups = ?, lastModified = ? WHERE id = ?`).run(JSON.stringify(groupIds), Date.now(), itemId);
+  sendDataToRenderer(userId, userRole);
+  syncDataWithFirebase();
+  return { success: true };
+});
+
+ipcMain.handle('remove-item-from-group', (event, { groupId, itemId, itemType, userId, userRole }) => {
+  const table = tableForItemType(itemType);
+  if (!table) return { success: false };
+  const item = db.prepare(`SELECT groups FROM ${table} WHERE id = ?`).get(itemId);
+  if (!item) return { success: false };
+  let groupIds = [];
+  try { groupIds = JSON.parse(item.groups || '[]'); } catch (e) { groupIds = []; }
+  groupIds = groupIds.filter(g => g !== groupId);
+  db.prepare(`UPDATE ${table} SET groups = ?, lastModified = ? WHERE id = ?`).run(JSON.stringify(groupIds), Date.now(), itemId);
+
+  // Si estaba fijado en ese grupo, también lo quitamos de la lista de fijados.
+  const group = db.prepare('SELECT pinnedItems FROM groups WHERE id = ?').get(groupId);
+  if (group) {
+    let pinned = [];
+    try { pinned = JSON.parse(group.pinnedItems || '[]'); } catch (e) { pinned = []; }
+    if (pinned.includes(itemId)) {
+      pinned = pinned.filter(id => id !== itemId);
+      db.prepare('UPDATE groups SET pinnedItems = ?, lastModified = ? WHERE id = ?').run(JSON.stringify(pinned), Date.now(), groupId);
+    }
+  }
+
+  sendDataToRenderer(userId, userRole);
+  sendGroupsToRenderer();
+  syncDataWithFirebase();
+  return { success: true };
+});
+
+ipcMain.handle('toggle-pin-in-group', (event, { groupId, itemId, pin }) => {
+  const group = db.prepare('SELECT * FROM groups WHERE id = ?').get(groupId);
+  if (!group) return { success: false };
+  let pinned = [];
+  try { pinned = JSON.parse(group.pinnedItems || '[]'); } catch (e) { pinned = []; }
+  if (pin) {
+    if (!pinned.includes(itemId)) pinned.push(itemId);
+  } else {
+    pinned = pinned.filter(id => id !== itemId);
+  }
+  db.prepare('UPDATE groups SET pinnedItems = ?, lastModified = ? WHERE id = ?').run(JSON.stringify(pinned), Date.now(), groupId);
+  sendGroupsToRenderer();
+  syncDataWithFirebase();
+  return { success: true };
 });
 
 ipcMain.handle('add-note', async (event, data) => {
