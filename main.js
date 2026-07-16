@@ -8,10 +8,26 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const admin = require('firebase-admin');
-const sharp = require('sharp');
 const bcrypt = require('bcrypt');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { autoUpdater } = require('electron-updater');
+
+// sharp es un módulo nativo (binario compilado, no JS puro). Si su binario no quedó bien
+// instalado/empacado en esta máquina, NO debe tumbar toda la aplicación — solo debe
+// deshabilitarse la compresión de imágenes en notas. Por eso se carga de forma diferida
+// (la primera vez que realmente se necesita) y con try/catch, en vez de al arrancar.
+let sharpModule = null;
+function getSharp() {
+  if (sharpModule === null) {
+    try {
+      sharpModule = require('sharp');
+    } catch (e) {
+      console.error('No se pudo cargar el módulo "sharp" (la compresión de imágenes quedará deshabilitada, se subirán sin comprimir):', e.message);
+      sharpModule = false;
+    }
+  }
+  return sharpModule || null;
+}
 
 let serviceAccount;
 try {
@@ -70,6 +86,13 @@ function setupAutoUpdater() {
 
   autoUpdater.on('update-available', (info) => {
     sendStatus(true, `Descargando actualización ${info.version}...`);
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    const pct = Math.round(progress.percent || 0);
+    const mbTransferred = (progress.transferred / (1024 * 1024)).toFixed(1);
+    const mbTotal = (progress.total / (1024 * 1024)).toFixed(1);
+    sendStatus(true, `Descargando actualización... ${pct}% (${mbTransferred} MB / ${mbTotal} MB)`);
   });
 
   autoUpdater.on('update-not-available', () => {
@@ -166,25 +189,32 @@ function setupChatListener() {
 
 
 async function compressImage(inputPath) {
+    const sharp = getSharp();
+    if (!sharp) {
+        // Sin sharp disponible: subimos la imagen original sin comprimir en vez de fallar.
+        return { path: inputPath, isTemp: false };
+    }
     const tempPath = path.join(app.getPath('temp'), `${uuidv4()}.webp`);
     await sharp(inputPath)
         .resize(800)
         .webp({ quality: 80 })
         .toFile(tempPath);
-    return tempPath;
+    return { path: tempPath, isTemp: true };
 }
 
 async function uploadImageToFirebase(localImagePath) {
     if (!localImagePath) return null;
     try {
-        const compressedImagePath = await compressImage(localImagePath);
+        const { path: compressedImagePath, isTemp } = await compressImage(localImagePath);
         const bucket = firebaseStorage.bucket();
+        const ext = (path.extname(compressedImagePath).replace('.', '') || 'webp').toLowerCase();
+        const contentType = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`;
         const firebasePath = `notes/images/${path.basename(compressedImagePath)}`;
         await bucket.upload(compressedImagePath, {
             destination: firebasePath,
-            metadata: { contentType: 'image/webp' }
+            metadata: { contentType }
         });
-        fs.unlinkSync(compressedImagePath);
+        if (isTemp) fs.unlinkSync(compressedImagePath);
         const file = bucket.file(firebasePath);
         const [url] = await file.getSignedUrl({ action: 'read', expires: '03-09-2491' });
         return url;
