@@ -940,6 +940,27 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     // Cola de alertas: si suenan varios recordatorios a la vez, se muestran uno por uno.
+    let reminderAlarmAudio = null;
+
+    function startReminderAlarmSound() {
+        stopReminderAlarmSound();
+        if (isMuted) return;
+        reminderAlarmAudio = new Audio('./assets/new-notification-09-352705.mp3');
+        reminderAlarmAudio.loop = true;
+        reminderAlarmAudio.volume = 0.6;
+        reminderAlarmAudio.play().catch(error => {
+            console.error("Error al reproducir la alarma del recordatorio:", error);
+        });
+    }
+
+    function stopReminderAlarmSound() {
+        if (reminderAlarmAudio) {
+            reminderAlarmAudio.pause();
+            reminderAlarmAudio.currentTime = 0;
+            reminderAlarmAudio = null;
+        }
+    }
+
     function processReminderAlertQueue() {
         if (currentAlertingReminderId || reminderAlertQueue.length === 0) return;
         const reminder = reminderAlertQueue.shift();
@@ -948,12 +969,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         reminderAlertNotes.textContent = reminder.notes || '';
         reminderAlertNotes.classList.toggle('hidden', !reminder.notes);
         reminderAlertSnoozeBtn.classList.toggle('hidden', reminder.maxSnoozes <= 0 || reminder.snoozeCount >= reminder.maxSnoozes);
-        playNotificationSound();
+        startReminderAlarmSound();
         openModal(reminderAlertModal);
     }
 
     reminderAlertSnoozeBtn.addEventListener('click', async () => {
         if (!currentAlertingReminderId) return;
+        stopReminderAlarmSound();
         await electronAPI.snoozeReminder({ id: currentAlertingReminderId, ownerId: currentUserId });
         closeModal(reminderAlertModal);
         currentAlertingReminderId = null;
@@ -961,6 +983,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     reminderAlertDismissBtn.addEventListener('click', async () => {
         if (!currentAlertingReminderId) return;
+        stopReminderAlarmSound();
         await electronAPI.dismissReminder({ id: currentAlertingReminderId, ownerId: currentUserId });
         closeModal(reminderAlertModal);
         currentAlertingReminderId = null;
