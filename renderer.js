@@ -24,7 +24,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const forgotPasswordModal = document.getElementById('forgotPasswordModal'), forgotUsername = document.getElementById('forgotUsername'), forgotBirthDate = document.getElementById('forgotBirthDate'), newPasswordReset = document.getElementById('newPasswordReset'), resetPasswordBtn = document.getElementById('resetPasswordBtn'), cancelResetBtn = document.getElementById('cancelResetBtn');
     const sidebar = document.getElementById('sidebar'), mainContent = document.getElementById('mainContent'), logoutBtn = document.getElementById('logoutBtn');
     const linksBtn = document.getElementById('linksBtn'), notesBtn = document.getElementById('notesBtn'), queriesBtn = document.getElementById('queriesBtn'), globalBtn = document.getElementById('globalBtn'), favoritesBtn = document.getElementById('favoritesBtn'), usersBtn = document.getElementById('usersBtn'), syncBtn = document.getElementById('syncBtn');
-    const linksSection = document.getElementById('linksSection'), notesSection = document.getElementById('notesSection'), queriesSection = document.getElementById('queriesSection'), globalSection = document.getElementById('globalSection'), groupsSection = document.getElementById('groupsSection'), favoritesSection = document.getElementById('favoritesSection'), usersSection = document.getElementById('usersSection');
+    const linksSection = document.getElementById('linksSection'), notesSection = document.getElementById('notesSection'), queriesSection = document.getElementById('queriesSection'), globalSection = document.getElementById('globalSection'), groupsSection = document.getElementById('groupsSection'), agendaSection = document.getElementById('agendaSection'), favoritesSection = document.getElementById('favoritesSection'), usersSection = document.getElementById('usersSection');
     const linksList = document.getElementById('linksList'), notesList = document.getElementById('notesList'), queriesList = document.getElementById('queriesList'), globalList = document.getElementById('globalList'), favoritesList = document.getElementById('favoritesList');
     const searchLinksBar = document.getElementById('searchLinksBar'), searchNotesBar = document.getElementById('searchNotesBar'), searchQueriesBar = document.getElementById('searchQueriesBar'), searchGlobalBar = document.getElementById('searchGlobalBar');
     const openAddLinkModalBtn = document.getElementById('openAddLinkModalBtn'), openAddNoteModalBtn = document.getElementById('openAddNoteModalBtn'), openAddQueryModalBtn = document.getElementById('openAddQueryModalBtn');
@@ -44,6 +44,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     const copyDateModal = document.getElementById('copyDateModal'), copyDateModalBody = document.getElementById('copyDateModalBody');
     const copyDateReplaceBtn = document.getElementById('copyDateReplaceBtn'), copyDateAsIsBtn = document.getElementById('copyDateAsIsBtn'), copyDateCancelBtn = document.getElementById('copyDateCancelBtn');
     const groupsBtn = document.getElementById('groupsBtn'), groupsListView = document.getElementById('groupsListView'), groupDetailView = document.getElementById('groupDetailView');
+    const agendaBtn = document.getElementById('agendaBtn');
+    const openNewReminderFormBtn = document.getElementById('openNewReminderFormBtn'), reminderFormContainer = document.getElementById('reminderFormContainer');
+    const reminderIdInput = document.getElementById('reminderIdInput'), reminderTitleInput = document.getElementById('reminderTitleInput'), reminderNotesInput = document.getElementById('reminderNotesInput'), reminderDueAtInput = document.getElementById('reminderDueAtInput');
+    const reminderRepeatTypeSelect = document.getElementById('reminderRepeatTypeSelect'), reminderCustomDaysContainer = document.getElementById('reminderCustomDaysContainer'), reminderIntervalDaysInput = document.getElementById('reminderIntervalDaysInput');
+    const reminderWeekdaysContainer = document.getElementById('reminderWeekdaysContainer'), reminderMaxSnoozesInput = document.getElementById('reminderMaxSnoozesInput');
+    const saveReminderBtn = document.getElementById('saveReminderBtn'), cancelReminderFormBtn = document.getElementById('cancelReminderFormBtn'), remindersListContainer = document.getElementById('remindersListContainer');
+    const reminderAlertModal = document.getElementById('reminderAlertModal'), reminderAlertTitle = document.getElementById('reminderAlertTitle'), reminderAlertNotes = document.getElementById('reminderAlertNotes'), reminderAlertSnoozeBtn = document.getElementById('reminderAlertSnoozeBtn'), reminderAlertDismissBtn = document.getElementById('reminderAlertDismissBtn');
+    let allReminders = [];
+    let reminderAlertQueue = [];
+    let currentAlertingReminderId = null;
     const groupsListContainer = document.getElementById('groupsListContainer'), openNewGroupFormBtn = document.getElementById('openNewGroupFormBtn'), newGroupFormContainer = document.getElementById('newGroupFormContainer'), newGroupNameInput = document.getElementById('newGroupNameInput'), confirmNewGroupBtn = document.getElementById('confirmNewGroupBtn');
     const groupsBackBtn = document.getElementById('groupsBackBtn'), groupDetailTitle = document.getElementById('groupDetailTitle'), groupSearchInput = document.getElementById('groupSearchInput'), groupSearchSuggestions = document.getElementById('groupSearchSuggestions'), groupDetailItemsList = document.getElementById('groupDetailItemsList');
     let allGroups = [];
@@ -73,9 +83,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function showSection(sectionId) {
-        [linksSection, notesSection, queriesSection, globalSection, groupsSection, favoritesSection, usersSection].forEach(s => s.classList.add('hidden'));
+        [linksSection, notesSection, queriesSection, globalSection, groupsSection, agendaSection, favoritesSection, usersSection].forEach(s => s.classList.add('hidden'));
         document.getElementById(sectionId).classList.remove('hidden');
-        [linksBtn, notesBtn, queriesBtn, globalBtn, groupsBtn, favoritesBtn, usersBtn].forEach(b => b.classList.remove('bg-blue-600'));
+        [linksBtn, notesBtn, queriesBtn, globalBtn, groupsBtn, agendaBtn, favoritesBtn, usersBtn].forEach(b => b.classList.remove('bg-blue-600'));
         
         if (sectionId === 'linksSection') linksBtn.classList.add('bg-blue-600');
         else if (sectionId === 'notesSection') notesBtn.classList.add('bg-blue-600');
@@ -89,6 +99,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             groupDetailView.classList.add('hidden');
             groupsListView.classList.remove('hidden');
             renderGroupsList();
+        } else if (sectionId === 'agendaSection') {
+            agendaBtn.classList.add('bg-blue-600');
+            reminderFormContainer.classList.add('hidden');
+            renderRemindersList();
         } else if (sectionId === 'favoritesSection') {
             favoritesBtn.classList.add('bg-blue-600');
             displayFavorites();
@@ -477,6 +491,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // --- Data Loading, Rendering & Sync ---
     async function loadInitialData() {
         await electronAPI.getInitialData({ userId: currentUserId, userRole: currentUserRole });
+        allReminders = await electronAPI.getReminders({ ownerId: currentUserId });
     }
 
     function refreshGroupViewsIfVisible() {
@@ -490,6 +505,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     electronAPI.onUpdateNotes((notes) => { allNotes = notes; filterNotes(); filterGlobal(); updateFavoritesList(); refreshGroupViewsIfVisible(); });
     electronAPI.onUpdateQueries((queries) => { allQueries = queries; filterQueries(); filterGlobal(); updateFavoritesList(); refreshGroupViewsIfVisible(); });
     electronAPI.onUpdateGroups((groups) => { allGroups = groups; refreshGroupViewsIfVisible(); });
+    electronAPI.onUpdateReminders((reminders) => {
+        allReminders = reminders;
+        if (!agendaSection.classList.contains('hidden')) renderRemindersList();
+    });
+    electronAPI.onReminderDue((reminder) => {
+        reminderAlertQueue.push(reminder);
+        processReminderAlertQueue();
+    });
     electronAPI.onUpdateUsers((users) => { allUsers = users; if(currentUserRole === 'admin' && !usersSection.classList.contains('hidden')) { renderUsers(); } });
 
 
@@ -793,6 +816,157 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
+    // --- Agenda / Recordatorios (100% local) ---
+    function formatReminderDate(ts) {
+        return new Date(ts).toLocaleString('es-MX', { dateStyle: 'medium', timeStyle: 'short' });
+    }
+
+    function reminderRepeatLabel(reminder) {
+        if (reminder.repeatType === 'daily') return 'todos los días';
+        if (reminder.repeatType === 'custom_days') return `cada ${reminder.repeatIntervalDays} día${reminder.repeatIntervalDays == 1 ? '' : 's'}`;
+        if (reminder.repeatType === 'weekdays') {
+            const names = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+            let days = [];
+            try { days = JSON.parse(reminder.repeatWeekdays || '[]'); } catch (e) { days = []; }
+            return days.length ? days.slice().sort().map(d => names[d]).join(', ') : 'sin días elegidos';
+        }
+        return 'no se repite';
+    }
+
+    function renderRemindersList() {
+        if (allReminders.length === 0) {
+            remindersListContainer.innerHTML = '<p class="text-sm text-gray-500 text-center py-6">No tienes recordatorios. Crea el primero con "Nuevo".</p>';
+            return;
+        }
+        remindersListContainer.innerHTML = allReminders.map(r => {
+            const snoozeInfo = r.maxSnoozes > 0 ? ` · pospuesto ${r.snoozeCount}/${r.maxSnoozes}` : '';
+            return `<div class="flex items-center justify-between bg-white p-3 rounded-lg shadow-sm border-l-4 border-amber-400">
+                        <div class="flex-1 min-w-0">
+                            <p class="font-semibold text-gray-800 truncate">${escapeAttr(r.title)}</p>
+                            <p class="text-xs text-gray-500">${formatReminderDate(r.dueAt)} · ${reminderRepeatLabel(r)}${snoozeInfo}</p>
+                            ${r.notes ? `<p class="text-xs text-gray-400 mt-1 truncate">${escapeAttr(r.notes)}</p>` : ''}
+                        </div>
+                        <div class="flex items-center space-x-1 flex-shrink-0">
+                            <button class="edit-reminder-btn p-2 text-gray-500 hover:text-blue-600" data-id="${r.id}" title="Editar"><i class="fas fa-pen"></i></button>
+                            <button class="delete-reminder-btn p-2 text-gray-500 hover:text-red-600" data-id="${r.id}" title="Eliminar"><i class="fas fa-trash"></i></button>
+                        </div>
+                    </div>`;
+        }).join('');
+    }
+
+    function toLocalDatetimeInputValue(ts) {
+        const d = new Date(ts);
+        return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    }
+
+    function resetReminderForm() {
+        reminderIdInput.value = '';
+        reminderTitleInput.value = '';
+        reminderNotesInput.value = '';
+        reminderRepeatTypeSelect.value = 'none';
+        reminderIntervalDaysInput.value = 2;
+        reminderMaxSnoozesInput.value = 3;
+        document.querySelectorAll('.reminder-weekday-cb').forEach(cb => cb.checked = false);
+        reminderCustomDaysContainer.classList.add('hidden');
+        reminderWeekdaysContainer.classList.add('hidden');
+        const suggested = new Date(Date.now() + 60 * 60 * 1000);
+        suggested.setSeconds(0, 0);
+        reminderDueAtInput.value = toLocalDatetimeInputValue(suggested.getTime());
+    }
+
+    openNewReminderFormBtn.addEventListener('click', () => {
+        resetReminderForm();
+        reminderFormContainer.classList.remove('hidden');
+    });
+    cancelReminderFormBtn.addEventListener('click', () => reminderFormContainer.classList.add('hidden'));
+
+    reminderRepeatTypeSelect.addEventListener('change', () => {
+        reminderCustomDaysContainer.classList.toggle('hidden', reminderRepeatTypeSelect.value !== 'custom_days');
+        reminderWeekdaysContainer.classList.toggle('hidden', reminderRepeatTypeSelect.value !== 'weekdays');
+    });
+
+    saveReminderBtn.addEventListener('click', async () => {
+        const title = reminderTitleInput.value.trim();
+        if (!title) { showMessage('Escribe qué quieres recordar.', true); return; }
+        if (!reminderDueAtInput.value) { showMessage('Selecciona la fecha y hora.', true); return; }
+        const repeatWeekdays = Array.from(document.querySelectorAll('.reminder-weekday-cb:checked')).map(cb => parseInt(cb.value, 10));
+        const payload = {
+            id: reminderIdInput.value || undefined,
+            ownerId: currentUserId,
+            title,
+            notes: reminderNotesInput.value.trim(),
+            dueAt: new Date(reminderDueAtInput.value).getTime(),
+            repeatType: reminderRepeatTypeSelect.value,
+            repeatIntervalDays: parseInt(reminderIntervalDaysInput.value, 10) || 1,
+            repeatWeekdays,
+            maxSnoozes: parseInt(reminderMaxSnoozesInput.value, 10) || 0
+        };
+        const result = reminderIdInput.value ? await electronAPI.updateReminder(payload) : await electronAPI.addReminder(payload);
+        if (result && result.success) {
+            reminderFormContainer.classList.add('hidden');
+            showMessage('Recordatorio guardado.');
+        } else {
+            showMessage('No se pudo guardar el recordatorio.', true);
+        }
+    });
+
+    remindersListContainer.addEventListener('click', async (e) => {
+        const editBtn = e.target.closest('.edit-reminder-btn');
+        if (editBtn) {
+            const r = allReminders.find(x => x.id === editBtn.dataset.id);
+            if (!r) return;
+            reminderIdInput.value = r.id;
+            reminderTitleInput.value = r.title;
+            reminderNotesInput.value = r.notes || '';
+            reminderDueAtInput.value = toLocalDatetimeInputValue(r.dueAt);
+            reminderRepeatTypeSelect.value = r.repeatType;
+            reminderIntervalDaysInput.value = r.repeatIntervalDays || 2;
+            reminderMaxSnoozesInput.value = r.maxSnoozes;
+            let days = [];
+            try { days = JSON.parse(r.repeatWeekdays || '[]'); } catch (e2) { days = []; }
+            document.querySelectorAll('.reminder-weekday-cb').forEach(cb => cb.checked = days.includes(parseInt(cb.value, 10)));
+            reminderCustomDaysContainer.classList.toggle('hidden', r.repeatType !== 'custom_days');
+            reminderWeekdaysContainer.classList.toggle('hidden', r.repeatType !== 'weekdays');
+            reminderFormContainer.classList.remove('hidden');
+            return;
+        }
+        const delBtn = e.target.closest('.delete-reminder-btn');
+        if (delBtn) {
+            openConfirmModal(async () => {
+                await electronAPI.deleteReminder({ id: delBtn.dataset.id, ownerId: currentUserId });
+                showMessage('Recordatorio eliminado.');
+            }, '¿Eliminar este recordatorio?');
+        }
+    });
+
+    // Cola de alertas: si suenan varios recordatorios a la vez, se muestran uno por uno.
+    function processReminderAlertQueue() {
+        if (currentAlertingReminderId || reminderAlertQueue.length === 0) return;
+        const reminder = reminderAlertQueue.shift();
+        currentAlertingReminderId = reminder.id;
+        reminderAlertTitle.textContent = reminder.title;
+        reminderAlertNotes.textContent = reminder.notes || '';
+        reminderAlertNotes.classList.toggle('hidden', !reminder.notes);
+        reminderAlertSnoozeBtn.classList.toggle('hidden', reminder.maxSnoozes <= 0 || reminder.snoozeCount >= reminder.maxSnoozes);
+        playNotificationSound();
+        openModal(reminderAlertModal);
+    }
+
+    reminderAlertSnoozeBtn.addEventListener('click', async () => {
+        if (!currentAlertingReminderId) return;
+        await electronAPI.snoozeReminder({ id: currentAlertingReminderId, ownerId: currentUserId });
+        closeModal(reminderAlertModal);
+        currentAlertingReminderId = null;
+        processReminderAlertQueue();
+    });
+    reminderAlertDismissBtn.addEventListener('click', async () => {
+        if (!currentAlertingReminderId) return;
+        await electronAPI.dismissReminder({ id: currentAlertingReminderId, ownerId: currentUserId });
+        closeModal(reminderAlertModal);
+        currentAlertingReminderId = null;
+        processReminderAlertQueue();
+    });
+
     function displayFavorites() { renderItems(allFavorites, favoritesList); }
     function updateFavoritesList() {
         allFavorites = [...allLinks, ...allNotes, ...allQueries].filter(i => i.isFavorite);
@@ -1018,6 +1192,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     queriesBtn.addEventListener('click', () => showSection('queriesSection'));
     globalBtn.addEventListener('click', () => showSection('globalSection'));
     groupsBtn.addEventListener('click', () => showSection('groupsSection'));
+    agendaBtn.addEventListener('click', () => showSection('agendaSection'));
     favoritesBtn.addEventListener('click', () => showSection('favoritesSection'));
     usersBtn.addEventListener('click', () => showSection('usersSection'));
 

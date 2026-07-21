@@ -47,6 +47,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   removeItemFromGroup: (data) => ipcRenderer.invoke('remove-item-from-group', data),
   togglePinInGroup: (data) => ipcRenderer.invoke('toggle-pin-in-group', data),
   onUpdateGroups: (callback) => ipcRenderer.on('update-groups', (event, groups) => callback(groups)),
+
+  // Agenda / Recordatorios (local)
+  getReminders: (data) => ipcRenderer.invoke('get-reminders', data),
+  addReminder: (data) => ipcRenderer.invoke('add-reminder', data),
+  updateReminder: (data) => ipcRenderer.invoke('update-reminder', data),
+  deleteReminder: (data) => ipcRenderer.invoke('delete-reminder', data),
+  snoozeReminder: (data) => ipcRenderer.invoke('snooze-reminder', data),
+  dismissReminder: (data) => ipcRenderer.invoke('dismiss-reminder', data),
+  onUpdateReminders: (callback) => ipcRenderer.on('update-reminders', (event, reminders) => callback(reminders)),
+  onReminderDue: (callback) => ipcRenderer.on('reminder-due', (event, reminder) => callback(reminder)),
   
   // Gestión de Sesión
   getSession: () => ipcRenderer.invoke('get-session'),

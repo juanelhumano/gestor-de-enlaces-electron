@@ -2,7 +2,7 @@
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Notification } = require('electron');
 const Database = require('better-sqlite3');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -444,6 +444,17 @@ function initializeDatabase() {
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, role TEXT NOT NULL
     )`);
 
+    // Agenda / recordatorios: 100% LOCALES, nunca se agregan a 'collections' ni se suben a
+    // Firebase. Cada uno pertenece a un usuario (ownerId) para que, si varias personas usan la
+    // misma máquina, cada quien vea solo los suyos.
+    db.exec(`CREATE TABLE IF NOT EXISTS reminders (
+      id TEXT PRIMARY KEY, ownerId TEXT NOT NULL, title TEXT NOT NULL, notes TEXT,
+      dueAt INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'scheduled',
+      repeatType TEXT NOT NULL DEFAULT 'none', repeatIntervalDays INTEGER DEFAULT 1, repeatWeekdays TEXT DEFAULT '[]',
+      maxSnoozes INTEGER NOT NULL DEFAULT 3, snoozeCount INTEGER NOT NULL DEFAULT 0,
+      createdAt INTEGER NOT NULL, isDeleted INTEGER DEFAULT 0
+    )`);
+
   } catch (err) {
     console.error('Error al inicializar la base de datos:', err.message);
   }
@@ -590,8 +601,113 @@ ipcMain.handle('delete-link', async (event, id) => {
   syncDataWithFirebase();
 });
 
+// --- Agenda / Recordatorios (100% local, nunca toca Firebase) ---
+function getRemindersData(ownerId) {
+    return db.prepare('SELECT * FROM reminders WHERE isDeleted = 0 AND ownerId = ? ORDER BY dueAt ASC').all(ownerId);
+}
+
+function sendRemindersToRenderer(ownerId) {
+    if (mainWindow && !mainWindow.isDestroyed() && ownerId) {
+        mainWindow.webContents.send('update-reminders', getRemindersData(ownerId));
+    }
+}
+
+function computeNextDueDate(reminder, fromTimestamp) {
+    const base = new Date(fromTimestamp);
+    if (reminder.repeatType === 'daily') {
+        base.setDate(base.getDate() + 1);
+        return base.getTime();
+    }
+    if (reminder.repeatType === 'custom_days') {
+        base.setDate(base.getDate() + Math.max(1, reminder.repeatIntervalDays || 1));
+        return base.getTime();
+    }
+    if (reminder.repeatType === 'weekdays') {
+        let weekdays = [];
+        try { weekdays = JSON.parse(reminder.repeatWeekdays || '[]'); } catch (e) { weekdays = []; }
+        if (weekdays.length === 0) { base.setDate(base.getDate() + 7); return base.getTime(); }
+        for (let i = 1; i <= 14; i++) {
+            const candidate = new Date(fromTimestamp);
+            candidate.setDate(candidate.getDate() + i);
+            if (weekdays.includes(candidate.getDay())) return candidate.getTime();
+        }
+        base.setDate(base.getDate() + 7);
+        return base.getTime();
+    }
+    return null; // 'none' → no se repite
+}
+
+function checkDueReminders() {
+    if (!db) return;
+    const now = Date.now();
+    let due = [];
+    try {
+        due = db.prepare("SELECT * FROM reminders WHERE isDeleted = 0 AND status = 'scheduled' AND dueAt <= ?").all(now);
+    } catch (e) { return; }
+    due.forEach(r => {
+        db.prepare("UPDATE reminders SET status = 'firing' WHERE id = ?").run(r.id);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('reminder-due', r);
+        }
+        try {
+            new Notification({ title: `⏰ ${r.title}`, body: r.notes || 'Recordatorio de tu Agenda' }).show();
+        } catch (e) { /* Notification puede no estar disponible en algunos entornos */ }
+    });
+}
+let reminderCheckInterval = null;
+
+ipcMain.handle('get-reminders', (event, { ownerId }) => getRemindersData(ownerId));
+
+ipcMain.handle('add-reminder', (event, data) => {
+    const id = uuidv4();
+    db.prepare(`INSERT INTO reminders (id, ownerId, title, notes, dueAt, status, repeatType, repeatIntervalDays, repeatWeekdays, maxSnoozes, snoozeCount, createdAt)
+                VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, 0, ?)`)
+      .run(id, data.ownerId, data.title.trim(), data.notes || null, data.dueAt, data.repeatType || 'none', data.repeatIntervalDays || 1, JSON.stringify(data.repeatWeekdays || []), data.maxSnoozes ?? 3, Date.now());
+    sendRemindersToRenderer(data.ownerId);
+    return { success: true, id };
+});
+
+ipcMain.handle('update-reminder', (event, data) => {
+    db.prepare(`UPDATE reminders SET title = ?, notes = ?, dueAt = ?, status = 'scheduled', repeatType = ?, repeatIntervalDays = ?, repeatWeekdays = ?, maxSnoozes = ?, snoozeCount = 0
+                WHERE id = ? AND ownerId = ?`)
+      .run(data.title.trim(), data.notes || null, data.dueAt, data.repeatType || 'none', data.repeatIntervalDays || 1, JSON.stringify(data.repeatWeekdays || []), data.maxSnoozes ?? 3, data.id, data.ownerId);
+    sendRemindersToRenderer(data.ownerId);
+    return { success: true };
+});
+
+ipcMain.handle('delete-reminder', (event, { id, ownerId }) => {
+    db.prepare('DELETE FROM reminders WHERE id = ? AND ownerId = ?').run(id, ownerId);
+    sendRemindersToRenderer(ownerId);
+    return { success: true };
+});
+
+ipcMain.handle('snooze-reminder', (event, { id, ownerId }) => {
+    const reminder = db.prepare('SELECT * FROM reminders WHERE id = ? AND ownerId = ?').get(id, ownerId);
+    if (!reminder) return { success: false };
+    if (reminder.snoozeCount >= reminder.maxSnoozes) return { success: false, message: 'Ya no puedes posponer más este recordatorio.' };
+    const newDueAt = Date.now() + 10 * 60 * 1000;
+    db.prepare("UPDATE reminders SET dueAt = ?, status = 'scheduled', snoozeCount = snoozeCount + 1 WHERE id = ?").run(newDueAt, id);
+    sendRemindersToRenderer(ownerId);
+    return { success: true };
+});
+
+ipcMain.handle('dismiss-reminder', (event, { id, ownerId }) => {
+    const reminder = db.prepare('SELECT * FROM reminders WHERE id = ? AND ownerId = ?').get(id, ownerId);
+    if (!reminder) return { success: false };
+    const nextDueAt = computeNextDueDate(reminder, reminder.dueAt);
+    if (nextDueAt) {
+        db.prepare("UPDATE reminders SET dueAt = ?, status = 'scheduled', snoozeCount = 0 WHERE id = ?").run(nextDueAt, id);
+    } else {
+        db.prepare('DELETE FROM reminders WHERE id = ?').run(id);
+    }
+    sendRemindersToRenderer(ownerId);
+    return { success: true };
+});
+
 // --- Grupos (etiquetas compartidas, muchos-a-muchos con links/notas/queries) ---
 ipcMain.handle('get-groups', () => getGroupsData());
+
+
 
 ipcMain.handle('add-group', (event, { name }) => {
   const trimmed = (name || '').trim();
@@ -838,6 +954,8 @@ app.whenReady().then(async () => {
   await deleteOldFirestoreChatMessages(); // Clean up old messages on startup
   createWindow();
   setupAutoUpdater();
+  reminderCheckInterval = setInterval(checkDueReminders, 20000);
+  checkDueReminders();
   if (process.platform === 'win32' || process.platform === 'darwin') {
     try { app.setLoginItemSettings({ openAtLogin: !!readSettings().openAtLogin }); } catch (e) { /* no-op */ }
   }
