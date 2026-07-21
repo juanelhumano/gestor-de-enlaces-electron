@@ -64,6 +64,10 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
 let mainWindow;
 let db;
+// Sesión activa de ESTA ejecución de la app, sin importar si el usuario marcó "recordarme".
+// La tabla 'sessions' de SQLite solo guarda algo si rememberMe estaba marcado; sin esto,
+// las sincronizaciones no sabían a quién avisarle que los datos cambiaron.
+let activeSession = null;
 const SALT_ROUNDS = 10;
 let chatListenerUnsubscribe = null; // Para detener el listener del chat
 
@@ -247,25 +251,31 @@ async function downloadAndConcileData() {
 
             db.transaction(() => {
                 snapshot.forEach(doc => {
-                    const remoteData = { id: doc.id, ...doc.data() };
-                    delete remoteData.isFavorite; 
-                    
-                    const localItem = db.prepare(`SELECT * FROM ${collectionName} WHERE id = ?`).get(remoteData.id);
-                    if (!remoteData.lastModified) remoteData.lastModified = Date.now();
-                    
-                    if (!localItem) {
-                        if (!remoteData.isDeleted) {
-                            const columns = Object.keys(remoteData).join(', ');
-                            const placeholders = Object.keys(remoteData).map(() => '?').join(', ');
-                            db.prepare(`INSERT OR REPLACE INTO ${collectionName} (${columns}) VALUES (${placeholders})`).run(...Object.values(remoteData));
+                    try {
+                        const remoteData = { id: doc.id, ...doc.data() };
+                        delete remoteData.isFavorite;
+
+                        const localItem = db.prepare(`SELECT * FROM ${collectionName} WHERE id = ?`).get(remoteData.id);
+                        if (!remoteData.lastModified) remoteData.lastModified = Date.now();
+
+                        if (!localItem) {
+                            if (!remoteData.isDeleted) {
+                                const columns = Object.keys(remoteData).join(', ');
+                                const placeholders = Object.keys(remoteData).map(() => '?').join(', ');
+                                db.prepare(`INSERT OR REPLACE INTO ${collectionName} (${columns}) VALUES (${placeholders})`).run(...Object.values(remoteData));
+                            }
+                        } else if (remoteData.lastModified > localItem.lastModified) {
+                            if (remoteData.isDeleted) {
+                                db.prepare(`DELETE FROM ${collectionName} WHERE id = ?`).run(remoteData.id);
+                            } else {
+                                const setStatements = Object.keys(remoteData).map(key => `${key} = ?`).join(', ');
+                                db.prepare(`UPDATE ${collectionName} SET ${setStatements} WHERE id = ?`).run(...Object.values(remoteData), remoteData.id);
+                            }
                         }
-                    } else if (remoteData.lastModified > localItem.lastModified) {
-                        if (remoteData.isDeleted) {
-                            db.prepare(`DELETE FROM ${collectionName} WHERE id = ?`).run(remoteData.id);
-                        } else {
-                            const setStatements = Object.keys(remoteData).map(key => `${key} = ?`).join(', ');
-                            db.prepare(`UPDATE ${collectionName} SET ${setStatements} WHERE id = ?`).run(...Object.values(remoteData), remoteData.id);
-                        }
+                    } catch (docError) {
+                        // No dejamos que UN documento problemático (ej. username duplicado) tumbe
+                        // la conciliación de toda la colección. Se reporta y se sigue con los demás.
+                        console.error(`No se pudo conciliar el documento "${doc.id}" de "${collectionName}": ${docError.message}`);
                     }
                 });
             })();
@@ -340,7 +350,7 @@ async function syncDataWithFirebase() {
         console.log('Sincronización completada.');
         if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('sync-status', { success: true, message: 'Datos sincronizados con Firebase.' });
-            const session = db.prepare('SELECT user_id, role FROM sessions LIMIT 1').get();
+            const session = activeSession || db.prepare('SELECT user_id, role FROM sessions LIMIT 1').get();
             if (session) {
                 sendDataToRenderer(session.user_id, session.role);
             }
@@ -468,12 +478,23 @@ function tableForItemType(itemType) {
     return { link: 'links', note: 'notes', query: 'queries' }[itemType];
 }
 
+function getUsersData() {
+    return db.prepare('SELECT id, username, role, status FROM users WHERE isDeleted = 0').all();
+}
+
+function sendUsersToRenderer() {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('update-users', getUsersData());
+    }
+}
+
 function sendDataToRenderer(userId, userRole) {
     if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('update-links', getDataForUser('links', userId, userRole));
         mainWindow.webContents.send('update-notes', getDataForUser('notes', userId, userRole));
         mainWindow.webContents.send('update-queries', getDataForUser('queries', userId, userRole));
         sendGroupsToRenderer();
+        sendUsersToRenderer();
     }
 }
 
@@ -486,6 +507,7 @@ ipcMain.handle('login', async (event, { username, password, rememberMe }) => {
             if (rememberMe) {
                 db.prepare('INSERT INTO sessions (user_id, role) VALUES (?, ?)').run(user.id, user.role);
             }
+            activeSession = { user_id: user.id, role: user.role };
             setupChatListener(); // Iniciar el listener de chat después del login
             return { success: true, role: user.role, userId: user.id, username: user.username };
         }
@@ -507,7 +529,7 @@ ipcMain.handle('toggle-favorite', (event, { itemId, userId, itemType }) => {
     } else {
         db.prepare('INSERT INTO favorites (id, itemId, userId, itemType, lastModified) VALUES (?, ?, ?, ?, ?)').run(favoriteId, itemId, userId, itemType, Date.now());
     }
-    const session = db.prepare('SELECT user_id, role FROM sessions LIMIT 1').get() || { user_id: userId, role: 'agente' }; // Fallback role
+    const session = activeSession || db.prepare('SELECT user_id, role FROM sessions LIMIT 1').get() || { user_id: userId, role: 'agente' }; // Fallback role
     sendDataToRenderer(session.user_id, session.role); 
     syncDataWithFirebase();
     return { success: true };
@@ -736,6 +758,7 @@ ipcMain.handle('reset-password', (event, data) => {
 ipcMain.handle('get-session', () => {
     const session = db.prepare('SELECT s.user_id, s.role, u.username FROM sessions s JOIN users u ON s.user_id = u.id LIMIT 1').get();
     if (session) {
+        activeSession = { user_id: session.user_id, role: session.role };
         setupChatListener(); // Re-iniciar listener si hay sesión guardada
         return { success: true, role: session.role, userId: session.user_id, username: session.username };
     }
@@ -746,6 +769,7 @@ ipcMain.handle('clear-session', () => {
         chatListenerUnsubscribe();
         chatListenerUnsubscribe = null;
     }
+    activeSession = null;
     db.prepare('DELETE FROM sessions').run()
 });
 ipcMain.handle('manual-sync', async () => syncDataWithFirebase());

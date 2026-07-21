@@ -40,6 +40,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const settingsBtn = document.getElementById('settingsBtn'), settingsModal = document.getElementById('settingsModal'), closeSettingsModalBtn = document.getElementById('closeSettingsModalBtn'), saveSettingsBtn = document.getElementById('saveSettingsBtn');
     const settingDefaultSection = document.getElementById('settingDefaultSection'), settingSearchMode = document.getElementById('settingSearchMode'), settingDarkMode = document.getElementById('settingDarkMode'), settingOpenAtLogin = document.getElementById('settingOpenAtLogin');
     const appVersionLabel = document.getElementById('appVersionLabel');
+    const currentUserLabel = document.getElementById('currentUserLabel');
     const copyDateModal = document.getElementById('copyDateModal'), copyDateModalBody = document.getElementById('copyDateModalBody');
     const copyDateReplaceBtn = document.getElementById('copyDateReplaceBtn'), copyDateAsIsBtn = document.getElementById('copyDateAsIsBtn'), copyDateCancelBtn = document.getElementById('copyDateCancelBtn');
     const groupsBtn = document.getElementById('groupsBtn'), groupsListView = document.getElementById('groupsListView'), groupDetailView = document.getElementById('groupDetailView');
@@ -289,6 +290,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     // --- Authentication & Session ---
+    function updateCurrentUserLabel() {
+        if (!currentUsername) { currentUserLabel.textContent = ''; return; }
+        const roleLabel = { admin: 'Admin', agente: 'Agente', visor: 'Visor' }[currentUserRole] || currentUserRole || '';
+        currentUserLabel.textContent = `${currentUsername}${roleLabel ? ' · ' + roleLabel : ''}`;
+    }
+
     async function handleLogin() {
         const result = await electronAPI.login({ 
             username: loginUsername.value, 
@@ -299,6 +306,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             currentUserRole = result.role;
             currentUserId = result.userId;
             currentUsername = result.username;
+            updateCurrentUserLabel();
             closeModal(loginModal);
             sidebar.classList.remove('hidden');
             mainContent.classList.remove('hidden');
@@ -354,6 +362,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             currentUserRole = session.role;
             currentUserId = session.userId;
             currentUsername = session.username;
+            updateCurrentUserLabel();
             closeModal(loginModal);
             sidebar.classList.remove('hidden');
             mainContent.classList.remove('hidden');
