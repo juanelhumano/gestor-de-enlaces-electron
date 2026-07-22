@@ -150,7 +150,7 @@ function addColumnIfNotExists(tableName, columnName, columnType, defaultValue) {
 }
 
 async function deleteOldFirestoreChatMessages() {
-    const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+    const oneDayAgo = admin.firestore.Timestamp.fromMillis(Date.now() - (24 * 60 * 60 * 1000));
     const chatRef = firestoreDb.collection('chat_messages');
     const oldMessagesSnapshot = await chatRef.where('timestamp', '<', oneDayAgo).get();
 
@@ -173,7 +173,7 @@ function setupChatListener() {
     if (chatListenerUnsubscribe) {
         chatListenerUnsubscribe(); // Detener listener anterior si existe
     }
-    const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+    const oneDayAgo = admin.firestore.Timestamp.fromMillis(Date.now() - (24 * 60 * 60 * 1000));
     const chatQuery = firestoreDb.collection('chat_messages')
                                  .where('timestamp', '>=', oneDayAgo)
                                  .orderBy('timestamp', 'asc');
@@ -181,7 +181,13 @@ function setupChatListener() {
     chatListenerUnsubscribe = chatQuery.onSnapshot(snapshot => {
         const messages = [];
         snapshot.forEach(doc => {
-            messages.push({ id: doc.id, ...doc.data() });
+            const data = doc.data();
+            // El timestamp llega como Firestore Timestamp; lo convertimos a milisegundos
+            // (número simple) para que viaje bien por IPC y se use igual que antes en la interfaz.
+            const timestamp = data.timestamp && typeof data.timestamp.toMillis === 'function'
+                ? data.timestamp.toMillis()
+                : Date.now();
+            messages.push({ id: doc.id, ...data, timestamp });
         });
         if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('chat-messages-update', messages);
@@ -938,7 +944,10 @@ ipcMain.handle('send-chat-message-to-firebase', async (event, { userId, username
             userId,
             username,
             message,
-            timestamp: Date.now()
+            // Usamos la hora del SERVIDOR de Firebase, no la de la computadora que envía.
+            // Así el orden de los mensajes es siempre consistente aunque el reloj de alguna
+            // máquina esté desfasado (esto era justo lo que causaba mensajes fuera de orden).
+            timestamp: admin.firestore.FieldValue.serverTimestamp()
         });
         return { success: true };
     } catch (err) {

@@ -197,8 +197,16 @@
         }
         body.dark-mode .bg-white,
         body.dark-mode .bg-gray-50,
-        body.dark-mode .bg-gray-100 {
+        body.dark-mode .bg-gray-100,
+        body.dark-mode .bg-gray-200 {
             background-color: #1e293b !important; /* slate-800 */
+        }
+        body.dark-mode .hover\:bg-gray-200:hover {
+            background-color: #334155 !important; /* slate-700 */
+        }
+        body.dark-mode a.text-blue-600,
+        body.dark-mode .text-blue-600 {
+            color: #60a5fa !important; /* blue-400, más legible sobre fondo oscuro */
         }
         body.dark-mode #sidebar { background-color: #0b1220 !important; }
         body.dark-mode .modal-content { background-color: #1e293b !important; color: #e2e8f0; }
@@ -234,7 +242,7 @@
         body.dark-mode #chatWindow,
         body.dark-mode #mentionSuggestions {
             background-color: #1e293b !important;
-            color: #e2e8f0;
+            color: #e2e8f0 !important;
         }
         body.dark-mode .mention-item {
             border-bottom-color: #334155;
