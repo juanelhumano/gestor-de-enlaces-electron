@@ -61,6 +61,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // Chat UI Elements
     const chatToggleButton = document.getElementById('chatToggleButton'), chatNotification = document.getElementById('chatNotification'), chatWindow = document.getElementById('chatWindow'), closeChatBtn = document.getElementById('closeChatBtn'), chatMessages = document.getElementById('chatMessages'), chatInput = document.getElementById('chatInput'), sendChatBtn = document.getElementById('sendChatBtn'), emojiBtn = document.getElementById('emojiBtn'), mentionSuggestions = document.getElementById('mentionSuggestions'), muteChatBtn = document.getElementById('muteChatBtn');
+    const newMessagesIndicator = document.getElementById('newMessagesIndicator');
+    let lastRenderedMessageCount = 0;
     const chatModeGeneralBtn = document.getElementById('chatModeGeneralBtn'), chatModeGeminiBtn = document.getElementById('chatModeGeminiBtn'), geminiOptionsContainer = document.getElementById('geminiOptionsContainer');
     
     // Emoji Picker Elements from Library
@@ -1240,13 +1242,38 @@ document.addEventListener('DOMContentLoaded', async () => {
         return color;
     }
 
+    function scrollChatToBottom() {
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+        newMessagesIndicator.classList.add('hidden');
+        newMessagesIndicator.classList.remove('flex');
+    }
+
     function renderChatMessages(messages) {
+        // Si ya estabas cerca del final, seguimos bajando solos como antes.
+        // Si estabas leyendo mensajes anteriores (scrolleado hacia arriba), NO te movemos:
+        // conservamos tu posición y solo avisamos con un botón si de verdad llegó algo nuevo.
+        const wasNearBottom = (chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight) < 100;
+        const hasNewMessages = messages.length > lastRenderedMessageCount;
+        const previousScrollTop = chatMessages.scrollTop;
+
         chatMessages.innerHTML = '';
         messages.forEach(msg => {
             chatMessages.appendChild(renderChatMessage(msg));
         });
-        chatMessages.scrollTop = chatMessages.scrollHeight;
+
+        if (wasNearBottom || lastRenderedMessageCount === 0) {
+            scrollChatToBottom();
+        } else {
+            chatMessages.scrollTop = previousScrollTop;
+            if (hasNewMessages) {
+                newMessagesIndicator.classList.remove('hidden');
+                newMessagesIndicator.classList.add('flex');
+            }
+        }
+        lastRenderedMessageCount = messages.length;
     }
+
+    newMessagesIndicator.addEventListener('click', scrollChatToBottom);
     
     function renderChatMessage(msg) {
         const mentionRegex = /@\[(Enlace|Nota|Query): (.*?)\]/g;
@@ -1356,7 +1383,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!chatWindow.classList.contains('hidden')) {
             chatNotification.classList.add('hidden');
             chatInput.focus();
-            setTimeout(() => chatMessages.scrollTop = chatMessages.scrollHeight, 0);
+            setTimeout(scrollChatToBottom, 0);
         }
     });
     closeChatBtn.addEventListener('click', () => chatWindow.classList.add('hidden'));
