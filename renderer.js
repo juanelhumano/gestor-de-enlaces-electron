@@ -140,6 +140,59 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
+    // --- Caché local de imágenes: la primera vez se descargan, luego se ven al instante ---
+    async function cacheAndSwapNoteImages(container) {
+        const imgs = Array.from(container.querySelectorAll('img[src^="http"]'));
+        if (imgs.length === 0) return;
+        const urls = Array.from(new Set(imgs.map(img => img.getAttribute('src'))));
+        try {
+            const map = await electronAPI.resolveImageCache(urls);
+            imgs.forEach(img => {
+                const original = img.getAttribute('src');
+                if (map[original]) img.src = map[original];
+            });
+        } catch (e) {
+            // Si falla el caché, las imágenes se quedan cargando de la red tal cual (sin romper nada).
+            console.error('No se pudo cachear alguna imagen:', e);
+        }
+    }
+
+    // --- Pegar imágenes (Ctrl+V) directo en el editor de notas, se suben a Dropbox ---
+    async function handleQuillImagePaste(e, quill) {
+        const clipboardData = e.clipboardData || window.clipboardData;
+        if (!clipboardData) return;
+        let imageFile = null;
+        for (let i = 0; i < clipboardData.items.length; i++) {
+            if (clipboardData.items[i].type && clipboardData.items[i].type.indexOf('image') !== -1) {
+                imageFile = clipboardData.items[i].getAsFile();
+                break;
+            }
+        }
+        if (!imageFile) return; // No es una imagen: deja que Quill maneje el pegado normal (texto).
+        e.preventDefault();
+        e.stopPropagation();
+
+        const range = quill.getSelection(true) || { index: quill.getLength() };
+        showMessage('Subiendo imagen...');
+
+        const reader = new FileReader();
+        reader.onload = async () => {
+            try {
+                const result = await electronAPI.uploadPastedImage(reader.result);
+                if (result && result.success) {
+                    quill.insertEmbed(range.index, 'image', result.url, 'user');
+                    quill.setSelection(range.index + 1);
+                    showMessage('Imagen agregada.');
+                } else {
+                    showMessage((result && result.message) || 'No se pudo subir la imagen.', true);
+                }
+            } catch (err) {
+                showMessage('Error al subir la imagen.', true);
+            }
+        };
+        reader.readAsDataURL(imageFile);
+    }
+
     // --- Detección de fechas en Queries (para el modal de copiar con fecha) ---
     function todayStr() {
         return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
@@ -1058,7 +1111,20 @@ document.addEventListener('DOMContentLoaded', async () => {
                     container.appendChild(link);
                     container.appendChild(copyBtn);
                 });
+                tempDiv.querySelectorAll('img').forEach(img => {
+                    const wrapper = document.createElement('span');
+                    wrapper.className = 'note-image-wrapper';
+                    img.parentNode.insertBefore(wrapper, img);
+                    wrapper.appendChild(img);
+
+                    const copyImgBtn = document.createElement('button');
+                    copyImgBtn.className = 'copy-image-btn';
+                    copyImgBtn.innerHTML = '<i class="fas fa-copy fa-xs"></i>';
+                    copyImgBtn.title = 'Copiar imagen al portapapeles';
+                    wrapper.appendChild(copyImgBtn);
+                });
                 viewNoteContent.innerHTML = tempDiv.innerHTML;
+                cacheAndSwapNoteImages(viewNoteContent);
                 
                 viewNoteImage.innerHTML = item.imagePath ? `<img src="${item.imagePath}" class="max-w-full h-auto max-h-80 object-contain mx-auto rounded-lg border" onerror="this.style.display='none';">` : '';
                 openModal(viewNoteModal);
@@ -1126,6 +1192,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 <button id="modalSaveBtn" class="w-full bg-green-600 text-white p-2 rounded-lg hover:bg-green-700 mt-4 flex-shrink-0">Guardar Nota</button>`;
 
             // Initialize Quill
+            if (window.ImageResize && !Quill.imports['modules/imageResize']) {
+                Quill.register('modules/imageResize', window.ImageResize.default || window.ImageResize);
+            }
             const quill = new Quill('#quill-editor-container', {
                 modules: {
                     toolbar: [
@@ -1134,7 +1203,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                         [{ 'list': 'ordered'}, { 'list': 'bullet' }],
                         [{ 'color': [] }, { 'background': [] }],
                         ['clean']
-                    ]
+                    ],
+                    imageResize: {}
                 },
                 placeholder: 'Escribe tu nota aquí...',
                 theme: 'snow'
@@ -1143,6 +1213,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 quill.root.innerHTML = item.content;
             }
             currentQuillInstance = quill;
+            quill.root.addEventListener('paste', (e) => handleQuillImagePaste(e, quill));
 
         } else if (type === 'query') {
             addEditModalTitle.textContent = item ? 'Editar Query' : 'Agregar Nueva Query';
@@ -1473,7 +1544,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     // Event delegation for copy link button in the note preview
-    viewNoteModal.addEventListener('click', (e) => {
+    viewNoteModal.addEventListener('click', async (e) => {
         const copyBtn = e.target.closest('.copy-link-btn');
         if (copyBtn) {
             e.preventDefault();
@@ -1482,6 +1553,20 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (link && link.tagName === 'A') {
                 // THIS IS THE FINAL FIX: Use innerText to get the visible URL/path
                 copyToClipboard(link.innerText);
+            }
+            return;
+        }
+        const copyImgBtn = e.target.closest('.copy-image-btn');
+        if (copyImgBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            const img = copyImgBtn.parentElement.querySelector('img');
+            if (!img || !img.src) return;
+            const result = await electronAPI.copyImageToClipboard(img.src);
+            if (result && result.success) {
+                showMessage('Imagen copiada al portapapeles.');
+            } else {
+                showMessage((result && result.message) || 'No se pudo copiar la imagen.', true);
             }
         }
     });

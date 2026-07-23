@@ -2,7 +2,7 @@
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
-const { app, BrowserWindow, ipcMain, dialog, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Notification, clipboard, nativeImage } = require('electron');
 const Database = require('better-sqlite3');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -27,6 +27,98 @@ function getSharp() {
     }
   }
   return sharpModule || null;
+}
+
+// Cliente de Dropbox para guardar imágenes pegadas en notas. Se crea de forma diferida y solo
+// si las credenciales están configuradas en .env; si faltan, la función de pegar imagen falla
+// con un mensaje claro en vez de tumbar la app.
+let dropboxClient = null;
+let dropboxClientAttempted = false;
+function getDropboxClient() {
+  if (dropboxClientAttempted) return dropboxClient;
+  dropboxClientAttempted = true;
+  const { DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN } = process.env;
+  if (!DROPBOX_APP_KEY || !DROPBOX_APP_SECRET || !DROPBOX_REFRESH_TOKEN) {
+    console.error('Dropbox no está configurado (faltan DROPBOX_APP_KEY / DROPBOX_APP_SECRET / DROPBOX_REFRESH_TOKEN en tu .env). Pegar imágenes en notas no funcionará hasta que lo configures.');
+    return null;
+  }
+  try {
+    const { Dropbox } = require('dropbox');
+    dropboxClient = new Dropbox({
+      clientId: DROPBOX_APP_KEY,
+      clientSecret: DROPBOX_APP_SECRET,
+      refreshToken: DROPBOX_REFRESH_TOKEN,
+      fetch
+    });
+  } catch (e) {
+    console.error('No se pudo inicializar el cliente de Dropbox:', e.message);
+    dropboxClient = null;
+  }
+  return dropboxClient;
+}
+
+async function uploadImageToDropbox(localImagePath) {
+  const dbx = getDropboxClient();
+  if (!dbx) return { success: false, message: 'Dropbox no está configurado en este equipo (revisa el archivo .env).' };
+  try {
+    const { path: compressedImagePath, isTemp } = await compressImage(localImagePath);
+    const fileBuffer = fs.readFileSync(compressedImagePath);
+    const dropboxPath = `/notas-imagenes/${uuidv4()}-${path.basename(compressedImagePath)}`;
+
+    await dbx.filesUpload({ path: dropboxPath, contents: fileBuffer, mode: { '.tag': 'add' }, autorename: true });
+    if (isTemp) { try { fs.unlinkSync(compressedImagePath); } catch (e) { /* no-op */ } }
+
+    let sharedUrl = null;
+    try {
+      const linkResult = await dbx.sharingCreateSharedLinkWithSettings({ path: dropboxPath });
+      sharedUrl = linkResult.result.url;
+    } catch (linkErr) {
+      // Si ya existía un link compartido para ese archivo, lo recuperamos en vez de fallar.
+      try {
+        const existing = await dbx.sharingListSharedLinks({ path: dropboxPath, direct_only: true });
+        sharedUrl = existing.result.links[0] ? existing.result.links[0].url : null;
+      } catch (e2) { /* no-op */ }
+    }
+    if (!sharedUrl) return { success: false, message: 'La imagen se subió pero no se pudo generar el link para compartirla.' };
+
+    // Convierte el link de vista previa de Dropbox (www.dropbox.com/.../?dl=0) a uno de
+    // contenido directo (dl.dropboxusercontent.com), necesario para usarlo como <img src="...">.
+    const directUrl = sharedUrl.replace('www.dropbox.com', 'dl.dropboxusercontent.com').replace(/([?&])dl=0/, '$1raw=1');
+    return { success: true, url: directUrl };
+  } catch (err) {
+    console.error('Error al subir la imagen a Dropbox:', err);
+    return { success: false, message: err.message || 'Error desconocido al subir a Dropbox.' };
+  }
+}
+
+// --- Caché local de imágenes vistas en notas (para que consultarlas sea rápido y no dependa
+// de la red cada vez). Se guardan en la carpeta de datos de la app, identificadas por un hash
+// de su URL, y nunca se vuelven a descargar una vez que ya están en disco.
+function getImageCacheDir() {
+    const dir = path.join(app.getPath('userData'), 'image-cache');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    return dir;
+}
+
+function cacheFilePathForUrl(url) {
+    const hash = crypto.createHash('sha256').update(url).digest('hex');
+    let ext = '.img';
+    try {
+        const pathname = new URL(url).pathname;
+        const found = path.extname(pathname);
+        if (found) ext = found;
+    } catch (e) { /* URL inválida: usamos la extensión genérica */ }
+    return path.join(getImageCacheDir(), `${hash}${ext}`);
+}
+
+async function ensureImageCached(url) {
+    const filePath = cacheFilePathForUrl(url);
+    if (fs.existsSync(filePath)) return filePath;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`HTTP ${response.status} al descargar la imagen`);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    fs.writeFileSync(filePath, buffer);
+    return filePath;
 }
 
 let serviceAccount;
@@ -921,6 +1013,59 @@ function writeSettings(settings) {
 
 ipcMain.handle('get-settings', () => readSettings());
 ipcMain.handle('get-app-version', () => app.getVersion());
+
+// Descarga (una sola vez) y sirve imágenes de notas desde caché local, para que verlas
+// después sea instantáneo en vez de tener que bajarlas de Dropbox cada vez.
+ipcMain.handle('resolve-image-cache', async (event, { urls }) => {
+    const result = {};
+    for (const url of (urls || [])) {
+        try {
+            const localPath = await ensureImageCached(url);
+            result[url] = `file://${localPath.replace(/\\/g, '/')}`;
+        } catch (e) {
+            console.error(`No se pudo cachear la imagen ${url}:`, e.message);
+            result[url] = url; // Falla la descarga: se deja la URL original (carga por red)
+        }
+    }
+    return result;
+});
+
+ipcMain.handle('copy-image-to-clipboard', async (event, src) => {
+    try {
+        let buffer;
+        if (src.startsWith('file://')) {
+            buffer = fs.readFileSync(decodeURIComponent(src.replace('file://', '')));
+        } else {
+            const response = await fetch(src);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            buffer = Buffer.from(await response.arrayBuffer());
+        }
+        const image = nativeImage.createFromBuffer(buffer);
+        if (image.isEmpty()) return { success: false, message: 'No se pudo leer la imagen.' };
+        clipboard.writeImage(image);
+        return { success: true };
+    } catch (err) {
+        console.error('Error al copiar imagen al portapapeles:', err);
+        return { success: false, message: err.message };
+    }
+});
+
+ipcMain.handle('upload-pasted-image', async (event, { dataUrl }) => {
+  try {
+    const matches = /^data:(image\/\w+);base64,(.+)$/.exec(dataUrl || '');
+    if (!matches) return { success: false, message: 'Formato de imagen no válido.' };
+    const subtype = matches[1].split('/')[1];
+    const ext = subtype === 'jpeg' ? 'jpg' : subtype;
+    const tempPath = path.join(app.getPath('temp'), `${uuidv4()}.${ext}`);
+    fs.writeFileSync(tempPath, Buffer.from(matches[2], 'base64'));
+    const result = await uploadImageToDropbox(tempPath);
+    try { fs.unlinkSync(tempPath); } catch (e) { /* no-op */ }
+    return result;
+  } catch (err) {
+    console.error('Error al procesar la imagen pegada:', err);
+    return { success: false, message: err.message };
+  }
+});
 
 ipcMain.handle('save-settings', (event, newSettings) => {
   const merged = { ...readSettings(), ...newSettings };

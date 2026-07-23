@@ -73,5 +73,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Configuración
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
-  getAppVersion: () => ipcRenderer.invoke('get-app-version')
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  uploadPastedImage: (dataUrl) => ipcRenderer.invoke('upload-pasted-image', { dataUrl }),
+  resolveImageCache: (urls) => ipcRenderer.invoke('resolve-image-cache', { urls }),
+  copyImageToClipboard: (src) => ipcRenderer.invoke('copy-image-to-clipboard', src)
 });

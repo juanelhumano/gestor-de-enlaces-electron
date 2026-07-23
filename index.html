@@ -13,6 +13,7 @@
     <!-- Quill Rich Text Editor -->
     <link href="https://cdn.quilljs.com/1.3.6/quill.snow.css" rel="stylesheet">
     <script src="https://cdn.quilljs.com/1.3.6/quill.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/quill-image-resize-module@3.0.0/image-resize.min.js"></script>
     <style>
         body {
             font-family: 'Inter', sans-serif;
@@ -101,6 +102,30 @@
         }
         .note-link-container:hover .copy-link-btn {
             opacity: 1;
+        }
+
+        /* Botón de "copiar imagen" sobre las imágenes al ver una nota */
+        .note-image-wrapper {
+            position: relative;
+            display: inline-block;
+            max-width: 100%;
+        }
+        .note-image-wrapper .copy-image-btn {
+            position: absolute;
+            top: 6px; right: 6px;
+            opacity: 0;
+            transition: opacity 0.2s ease-in-out;
+            background-color: rgba(17, 24, 39, 0.65);
+            color: white;
+            border-radius: 9999px;
+            width: 28px; height: 28px;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .note-image-wrapper:hover .copy-image-btn {
+            opacity: 1;
+        }
+        .note-image-wrapper .copy-image-btn:hover {
+            background-color: rgba(37, 99, 235, 0.9);
         }
 
         /* Chat Styles */
