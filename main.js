@@ -5,6 +5,7 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { app, BrowserWindow, ipcMain, dialog, Notification, clipboard, nativeImage } = require('electron');
 const Database = require('better-sqlite3');
 const fs = require('fs');
+const { pathToFileURL, fileURLToPath } = require('url');
 const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const admin = require('firebase-admin');
@@ -1021,7 +1022,7 @@ ipcMain.handle('resolve-image-cache', async (event, { urls }) => {
     for (const url of (urls || [])) {
         try {
             const localPath = await ensureImageCached(url);
-            result[url] = `file://${localPath.replace(/\\/g, '/')}`;
+            result[url] = pathToFileURL(localPath).href;
         } catch (e) {
             console.error(`No se pudo cachear la imagen ${url}:`, e.message);
             result[url] = url; // Falla la descarga: se deja la URL original (carga por red)
@@ -1034,7 +1035,7 @@ ipcMain.handle('copy-image-to-clipboard', async (event, src) => {
     try {
         let buffer;
         if (src.startsWith('file://')) {
-            buffer = fs.readFileSync(decodeURIComponent(src.replace('file://', '')));
+            buffer = fs.readFileSync(fileURLToPath(src));
         } else {
             const response = await fetch(src);
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
